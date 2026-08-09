@@ -1200,6 +1200,24 @@ menu "Ghost ESP Options"
         help
             Define the UART RX pin baud rate for GPS.
 
+    config GPS_POWER_PIN
+        int "GPS power-control pin"
+        range -1 48
+        default -1
+        depends on HAS_GPS
+        help
+            Optional GPIO controlling power to an onboard GPS. Set to -1 when
+            the GPS is always powered or when no power-control pin exists.
+
+    config GPS_POWER_ACTIVE_LEVEL
+        int "GPS power active level"
+        range 0 1
+        default 1
+        depends on HAS_GPS && GPS_POWER_PIN >= 0
+        help
+            GPIO level that enables GPS power: 0 for active-low, 1 for
+            active-high.
+
     config NMEA_PARSER_RING_BUFFER_SIZE
         int "NMEA Parser Ring Buffer Size"
         range 0 2048
@@ -1640,4 +1658,3 @@ menu "Ghost ESP Options"
     endmenu
 
 endmenu
-
