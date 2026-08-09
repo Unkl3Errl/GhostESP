@@ -278,6 +278,7 @@ A few things set GhostESP apart from every other ESP32 firmware:
 | AWOK Mini | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✗ | Full | ✗ | ✗ | ✓ |
 | Cardputer | ✓ | ✗ | ✓ | ✓ | ✗ | ✓ | ✓ | Full | ✓ | ✓ | ✗ |
 | Heltec V3 | ✓ | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ | Status | ✓ | ✗ | ✗ |
+| Heltec V4 | ✓ | ✗ | ✓ | ✗ | ✗ | ✓ | ✗ | Status | ✓ | ✗ | ✗ |
 | CYD2 USB | ✓ | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ | Full | ✓ | ✗ | ✗ |
 | CYD2 Micro USB | ✓ | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ | Full | ✓ | ✗ | ✗ |
 | CYD2 Dual USB | ✓ | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ | Full | ✓ | ✗ | ✗ |

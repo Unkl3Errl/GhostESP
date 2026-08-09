@@ -19,5 +19,4 @@ add_prebuilt_library(esp_sdec "${CMAKE_CURRENT_SOURCE_DIR}/lib/${CONFIG_IDF_TARG
                      PRIV_REQUIRES ${BASE_DIR})
 set(TARGET_LIB_NAME esp_sdec esp_acodec)
 
-target_link_libraries(${COMPONENT_LIB}  PRIVATE "-L ${CMAKE_CURRENT_SOURCE_DIR}/lib/${CONFIG_IDF_TARGET}")
 target_link_libraries(${COMPONENT_LIB}  PRIVATE ${TARGET_LIB_NAME})
