@@ -9,6 +9,7 @@
 #include "freertos/semphr.h"
 #include <stdbool.h>
 #include "core/esp_comm_manager.h"
+#include "core/serial_manager.h"
 #include "managers/ap_manager.h"
 
 #define GLOG_BUF_SIZE 512
@@ -41,9 +42,12 @@ static inline void glog_unlock(void) {
 }
 
 static inline void glog_emit(const char *buf) {
-    printf("%s", buf);
+    size_t len = strlen(buf);
+    if (serial_manager_write_bytes(buf, len) <= 0) {
+        printf("%s", buf);
+    }
     if (esp_comm_manager_should_forward_output()) {
-        esp_comm_manager_send_response((const uint8_t *)buf, strlen(buf));
+        esp_comm_manager_send_response((const uint8_t *)buf, len);
     }
     ap_manager_add_log(buf);
 }
@@ -139,5 +143,4 @@ void glog_flush_deferred(void) {
         free(out);
     }
 }
-
 

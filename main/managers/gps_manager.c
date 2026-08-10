@@ -83,6 +83,28 @@ static void gps_soft_try_release_rgb_rmt(void);
 static void gps_soft_try_reacquire_rgb_rmt(void);
 static void gps_soft_prepare_rx_pin(void);
 
+static void gps_set_board_power(bool enabled) {
+#if defined(CONFIG_HAS_GPS) && defined(CONFIG_GPS_POWER_PIN) && (CONFIG_GPS_POWER_PIN >= 0)
+    const gpio_num_t power_pin = (gpio_num_t)CONFIG_GPS_POWER_PIN;
+    const int active_level = CONFIG_GPS_POWER_ACTIVE_LEVEL ? 1 : 0;
+    const int requested_level = enabled ? active_level : !active_level;
+
+    gpio_reset_pin(power_pin);
+    gpio_set_direction(power_pin, GPIO_MODE_OUTPUT);
+    gpio_set_level(power_pin, requested_level);
+    ESP_LOGI(GPS_TAG,
+             "GPS power %s on IO%d (level %d)",
+             enabled ? "enabled" : "disabled",
+             (int)power_pin,
+             requested_level);
+    if (enabled) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+#else
+    (void)enabled;
+#endif
+}
+
 static bool gps_lifecycle_begin(const char *operation) {
     TaskHandle_t current = xTaskGetCurrentTaskHandle();
     bool acquired = false;
@@ -760,6 +782,7 @@ void gps_manager_init(GPSManager *manager) {
         return;
     }
 
+    gps_set_board_power(true);
     glog("GPS RX: IO%d\n", current_rx_pin);
 
     bool preserve_dualcomm = gps_should_preserve_dualcomm();
@@ -904,6 +927,7 @@ void gps_manager_init(GPSManager *manager) {
             esp_comm_manager_init_with_defaults();
             gps_disabled_comm_for_conflict = false;
         }
+        gps_set_board_power(false);
         gps_lifecycle_end();
         return;
     }
@@ -1191,6 +1215,7 @@ void gps_manager_deinit(GPSManager *manager) {
     } else {
         status_display_show_status("GPS Not Init");
     }
+    gps_set_board_power(false);
     gps_lifecycle_end();
 }
 
