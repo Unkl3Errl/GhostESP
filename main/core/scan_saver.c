@@ -5,6 +5,7 @@
 #include "managers/settings_manager.h"
 #include "gui/toast.h"
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -12,6 +13,7 @@
 #define SCANS_DIR "/mnt/ghostesp/scans"
 #define FLUSH_INTERVAL 16
 #define BUFFERED_FLUSH_INTERVAL 64
+static atomic_uint active_scan_files = 0;
 #if CONFIG_SPIRAM
 #define SCAN_BUFFER_CAPACITY (16 * 1024)
 #else
@@ -65,6 +67,12 @@ static bool flush_staging_buffer(scan_file_t *sf) {
 
 bool scan_file_is_open(const scan_file_t *sf) {
     return sf && (sf->fp != NULL || sf->buffered);
+}
+
+bool scan_file_is_active_path(const char *path) {
+    const size_t prefix_len = sizeof(SCANS_DIR) - 1;
+    return path && strncmp(path, SCANS_DIR, prefix_len) == 0 &&
+           path[prefix_len] == '/' && atomic_load(&active_scan_files) > 0;
 }
 
 esp_err_t scan_file_open(scan_file_t *sf, const char *prefix, const char *extension) {
@@ -127,6 +135,7 @@ esp_err_t scan_file_open(scan_file_t *sf, const char *prefix, const char *extens
     }
 
     printf("Scan file opened: %s%s\n", sf->path, sf->buffered ? " (buffered)" : "");
+    atomic_fetch_add(&active_scan_files, 1);
     return ESP_OK;
 }
 
@@ -179,6 +188,7 @@ void scan_file_printf(scan_file_t *sf, const char *fmt, ...) {
 
 void scan_file_close(scan_file_t *sf) {
     if (!sf) return;
+    bool was_open = scan_file_is_open(sf);
     bool saved = false;
 
     if (sf->fp) {
@@ -205,6 +215,8 @@ void scan_file_close(scan_file_t *sf) {
     sf->display_suspended = false;
     sf->write_count = 0;
     sf->path[0] = '\0';
+
+    if (was_open) atomic_fetch_sub(&active_scan_files, 1);
 
     if (saved) {
         printf("Scan file saved\n");

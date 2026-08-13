@@ -34,5 +34,6 @@ esp_err_t scan_file_open(scan_file_t *sf, const char *prefix, const char *extens
 void scan_file_printf(scan_file_t *sf, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 void scan_file_close(scan_file_t *sf);
 bool scan_file_is_open(const scan_file_t *sf);
+bool scan_file_is_active_path(const char *path);
 
 #endif

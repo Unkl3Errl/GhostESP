@@ -22,6 +22,7 @@
 #include <stdbool.h>
 
 #define RADIOTAP_HEADER_LEN 8
+#define ANDROID_SPOOL_SEGMENT_BYTES (128U * 1024U)
 
 static const char *PCAP_TAG = "PCAP";
 static bool is_valid_tag_length(uint8_t tag_num, uint8_t tag_len);
@@ -501,6 +502,7 @@ esp_err_t pcap_file_open_in_dir(const char *base_file_name,
 
   buffer_offset = 0;
   s_capture_active = false;
+  pcap_file_path[0] = '\0';
 
   if (sd_card_exists(pcap_dir_path)) {
     get_next_pcap_file_name(file_name, pcap_dir_path, pcap_base_name);
@@ -947,6 +949,30 @@ static esp_err_t _pcap_flush_wireshark_stream_nolock() {
 static esp_err_t _pcap_flush_buffer_to_file_nolock() {
   if (buffer_offset > 0) {
     if (pcap_file) { // If file is open, write to file
+      if (fflush(pcap_file) == 0) {
+        long current_size = ftell(pcap_file);
+        if (current_size > 0 &&
+            (uint64_t)current_size + buffer_offset > ANDROID_SPOOL_SEGMENT_BYTES) {
+          char previous_path[MAX_FILE_NAME_LENGTH];
+          strncpy(previous_path, pcap_file_path, sizeof(previous_path) - 1);
+          previous_path[sizeof(previous_path) - 1] = '\0';
+          fclose(pcap_file);
+          pcap_file = NULL;
+          get_next_pcap_file_name(pcap_file_path, pcap_dir_path, pcap_base_name);
+          pcap_file = fopen(pcap_file_path, "wb");
+          if (!pcap_file || pcap_write_global_header(pcap_file, s_capture_type) != ESP_OK) {
+            if (pcap_file) fclose(pcap_file);
+            unlink(pcap_file_path);
+            strncpy(pcap_file_path, previous_path, sizeof(pcap_file_path) - 1);
+            pcap_file_path[sizeof(pcap_file_path) - 1] = '\0';
+            pcap_file = fopen(pcap_file_path, "ab");
+            ESP_LOGE(PCAP_TAG, "Failed to rotate PCAP spool segment.");
+          }
+        }
+      }
+      if (!pcap_file) {
+        return ESP_FAIL;
+      }
       size_t written = fwrite(pcap_buffer, 1, buffer_offset, pcap_file);
       if (written < buffer_offset) {
         ESP_LOGE(PCAP_TAG, "Failed to write buffered data to PCAP file.");
@@ -966,14 +992,34 @@ static esp_err_t _pcap_flush_buffer_to_file_nolock() {
           if (f) {
             fseek(f, 0, SEEK_END);
             long sz = ftell(f);
-            if (sz == 0) {
-              // write global header on first write
-              pcap_write_global_header(f, s_capture_type);
+            if (sz > 0 && (uint64_t)sz + buffer_offset > ANDROID_SPOOL_SEGMENT_BYTES) {
+              char previous_path[MAX_FILE_NAME_LENGTH];
+              strncpy(previous_path, pcap_file_path, sizeof(previous_path) - 1);
+              previous_path[sizeof(previous_path) - 1] = '\0';
+              fclose(f);
+              get_next_pcap_file_name(pcap_file_path, pcap_dir_path, pcap_base_name);
+              f = fopen(pcap_file_path, "wb");
+              if (f) {
+                sz = 0;
+              } else {
+                strncpy(pcap_file_path, previous_path, sizeof(pcap_file_path) - 1);
+                pcap_file_path[sizeof(pcap_file_path) - 1] = '\0';
+                f = fopen(pcap_file_path, "ab");
+              }
             }
-            size_t written = fwrite(pcap_buffer, 1, buffer_offset, f);
-            fclose(f);
-            if (written < buffer_offset) {
+            if (f && sz == 0) {
+              // write global header on first write
+              if (pcap_write_global_header(f, s_capture_type) != ESP_OK) {
+                fclose(f);
+                f = NULL;
+              }
+            }
+            size_t written = f ? fwrite(pcap_buffer, 1, buffer_offset, f) : 0;
+            if (f) fclose(f);
+            if (written != buffer_offset) {
               ESP_LOGE(PCAP_TAG, "Failed to write buffered data to PCAP file (JIT).");
+              sd_card_unmount_after_flush(display_was_suspended);
+              return ESP_FAIL;
             }
           }
           sd_card_unmount_after_flush(display_was_suspended);
@@ -1005,6 +1051,19 @@ static esp_err_t _pcap_flush_buffer_to_file_nolock() {
     buffer_offset = 0; // Reset buffer
   }
   return ESP_OK;
+}
+
+bool pcap_file_is_active_path(const char *path) {
+  if (!path || !pcap_mutex) return false;
+  bool active = false;
+  if (xSemaphoreTake(pcap_mutex, pdMS_TO_TICKS(250)) == pdTRUE) {
+    active = s_capture_active && pcap_file_path[0] != '\0' &&
+             strcmp(path, pcap_file_path) == 0;
+    xSemaphoreGive(pcap_mutex);
+  } else if (s_capture_active) {
+    active = true;
+  }
+  return active;
 }
 
 void pcap_discard_buffer(void) {

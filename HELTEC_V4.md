@@ -43,6 +43,25 @@ SDKCONFIG_DEFAULTS=sdkconfig.defaults idf.py build
 The GitHub workflow packages `HeltecV4.zip` with `bootloader.bin`,
 `partitions.bin`, `firmware.bin`, the ELF file, and a merged image.
 
+## Android-backed storage
+
+The Heltec V4 target uses a 12 MB wear-levelled FAT partition in internal flash
+as its virtual SD card. Captures, wardriving CSV files, and saved scan results
+are split into approximately 128 KiB closed segments. HeltecController 0.8.4 or
+newer can copy those closed files to a user-selected Android folder over USB,
+verify their exact byte count and CRC-32, and then acknowledge them. GhostESP
+does not release a source file until that acknowledgement matches.
+
+The virtual storage is formatted automatically only when its entire flash
+partition is blank. A nonblank partition that cannot be mounted is retained for
+recovery instead of being reformatted.
+
+This is a finite spool, not unlimited storage by itself. For sustained capture,
+keep the Android device connected, keep the selected Android destination
+writable, and leave enough free space on the phone. If Android disconnects,
+revokes folder access, or fills up, GhostESP retains unacknowledged files until
+its internal spool is full rather than deleting unverified data.
+
 ## Flash
 
 The ESP32-S3 bootloader is at offset `0x0`, the partition table at `0x8000`,
@@ -55,3 +74,13 @@ idf.py -p /dev/cu.usbmodemXXXX flash monitor
 
 Erasing before the first GhostESP installation intentionally removes the
 previous firmware and its saved settings.
+
+Do not use `erase-flash` for a routine update when the virtual SD contains data
+you still need. Flashing the generated merged image at offset `0x0` updates the
+bootloader, partition table, and application while leaving the `storage`
+partition at `0x400000` untouched:
+
+```sh
+esptool.py --chip esp32s3 -p /dev/cu.usbmodemXXXX write_flash \
+  0x0 GhostESP-heltecv4-android-storage.bin
+```

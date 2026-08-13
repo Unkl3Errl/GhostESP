@@ -16,6 +16,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <esp_heap_caps.h>
 #include "ff.h"
 #include "freertos/FreeRTOS.h"
@@ -26,6 +27,7 @@
 static const char *GPS_TAG = "GPS";
 static const char *CSV_TAG = "CSV";
 static const char *CSV_HEADER = "MAC,SSID,AuthMode,FirstSeen,Channel,Frequency,RSSI,CurrentLatitude,CurrentLongitude,AltitudeMeters,AccuracyMeters,RCOIs,MfgrId,Type\n";
+#define ANDROID_SPOOL_SEGMENT_BYTES (128U * 1024U)
 
 static bool is_valid_date(const gps_date_t *date);
 
@@ -693,6 +695,11 @@ bool csv_file_is_open(void) {
     return !csv_closing && csv_buffer != NULL;
 }
 
+bool csv_file_is_active_path(const char *path) {
+    return path && csv_file_is_open() && csv_file_path[0] != '\0' &&
+           strcmp(path, csv_file_path) == 0;
+}
+
 esp_err_t csv_file_open(const char *base_file_name) {
     if (csv_buffer || csv_flush_task || csv_file) {
         return ESP_ERR_INVALID_STATE;
@@ -1008,8 +1015,23 @@ static esp_err_t csv_write_chunk_to_sink(const char *data, size_t len) {
                     // The producer buffer never contains headers; each new JIT file does.
                     fseek(f, 0, SEEK_END);
                     long sz = ftell(f);
-                    if (sz == 0 && csv_write_header(f) != ESP_OK) {
+                    if (sz > 0 && (uint64_t)sz + len > ANDROID_SPOOL_SEGMENT_BYTES) {
+                        char previous_path[GPS_MAX_FILE_NAME_LENGTH];
+                        strncpy(previous_path, csv_file_path, sizeof(previous_path) - 1);
+                        previous_path[sizeof(previous_path) - 1] = '\0';
                         fclose(f);
+                        get_next_csv_file_name(csv_file_path, csv_base_name);
+                        f = fopen(csv_file_path, "wb");
+                        if (f) {
+                            sz = 0;
+                        } else {
+                            strncpy(csv_file_path, previous_path, sizeof(csv_file_path) - 1);
+                            csv_file_path[sizeof(csv_file_path) - 1] = '\0';
+                            f = fopen(csv_file_path, "ab");
+                        }
+                    }
+                    if (!f || (sz == 0 && csv_write_header(f) != ESP_OK)) {
+                        if (f) fclose(f);
                         sd_card_unmount_after_flush(display_was_suspended);
                         csv_jit_sd_disabled = true;
                         return ESP_FAIL;
@@ -1074,6 +1096,31 @@ static esp_err_t csv_write_chunk_to_sink(const char *data, size_t len) {
         return ESP_OK;
     }
 
+    if (fflush(csv_file) == 0) {
+        long current_size = ftell(csv_file);
+        if (current_size > 0 &&
+            (uint64_t)current_size + len > ANDROID_SPOOL_SEGMENT_BYTES) {
+            char previous_path[GPS_MAX_FILE_NAME_LENGTH];
+            strncpy(previous_path, csv_file_path, sizeof(previous_path) - 1);
+            previous_path[sizeof(previous_path) - 1] = '\0';
+            fclose(csv_file);
+            csv_file = NULL;
+            get_next_csv_file_name(csv_file_path, csv_base_name);
+            csv_file = fopen(csv_file_path, "wb");
+            if (!csv_file || csv_write_header(csv_file) != ESP_OK) {
+                if (csv_file) fclose(csv_file);
+                unlink(csv_file_path);
+                strncpy(csv_file_path, previous_path, sizeof(csv_file_path) - 1);
+                csv_file_path[sizeof(csv_file_path) - 1] = '\0';
+                csv_file = fopen(csv_file_path, "ab");
+                glog("Failed to rotate CSV spool segment.\n");
+                if (!csv_file) {
+                    csv_header_pending_uart = true;
+                    return ESP_FAIL;
+                }
+            }
+        }
+    }
     size_t written = fwrite(data, 1, len, csv_file);
     TickType_t now = xTaskGetTickCount();
     bool sync_due = csv_closing || csv_last_sync_tick == 0 ||
