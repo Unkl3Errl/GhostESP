@@ -516,26 +516,6 @@ void sd_card_get_cached_stats(sd_card_cached_stats_t *out) {
 static wl_handle_t s_wl_handle = WL_INVALID_HANDLE;
 static bool s_virtual_storage_mounted = false;
 
-static bool virtual_storage_partition_is_blank(const esp_partition_t *partition) {
-    if (!partition) return false;
-
-    uint8_t buffer[512];
-    for (size_t offset = 0; offset < partition->size; offset += sizeof(buffer)) {
-        size_t length = partition->size - offset;
-        if (length > sizeof(buffer)) length = sizeof(buffer);
-        if (esp_partition_read(partition, offset, buffer, length) != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to inspect virtual storage at offset 0x%lx",
-                     (unsigned long)offset);
-            return false;
-        }
-        for (size_t index = 0; index < length; ++index) {
-            if (buffer[index] != 0xFF) return false;
-        }
-        if ((offset & 0xFFFF) == 0) taskYIELD();
-    }
-    return true;
-}
-
 static esp_err_t mount_virtual_storage(void) {
     if (s_virtual_storage_mounted) {
         ESP_LOGI(TAG, "Virtual storage already mounted");
@@ -556,24 +536,20 @@ static esp_err_t mount_virtual_storage(void) {
         return ESP_ERR_INVALID_SIZE;
     }
 
-    const bool blank_partition = virtual_storage_partition_is_blank(storage_partition);
     esp_vfs_fat_mount_config_t mount_config = {
-        .format_if_mount_failed = false,
+        /* A valid spool is mounted unchanged. If this reserved partition holds
+         * incompatible bytes from an older layout, ESP-IDF formats it within
+         * this same mount operation. Do not split this into two mount calls:
+         * the first failed call can leave the WL layer attached and make the
+         * retry fail with ESP_ERR_INVALID_STATE. */
+        .format_if_mount_failed = true,
         .max_files = 12,
         .allocation_unit_size = 4 * 1024
     };
 
     esp_err_t ret = esp_vfs_fat_spiflash_mount_rw_wl("/mnt", "storage", &mount_config, &s_wl_handle);
-    if (ret != ESP_OK && blank_partition) {
-        ESP_LOGI(TAG, "Formatting blank virtual storage partition");
-        mount_config.format_if_mount_failed = true;
-        ret = esp_vfs_fat_spiflash_mount_rw_wl("/mnt", "storage", &mount_config, &s_wl_handle);
-    }
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to mount virtual storage: %s", esp_err_to_name(ret));
-        if (!blank_partition) {
-            ESP_LOGE(TAG, "Existing virtual storage retained without formatting");
-        }
         toast_show("Virtual storage mount failed", TOAST_ERROR);
         return ret;
     }

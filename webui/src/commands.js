@@ -295,10 +295,10 @@ const SETTINGS_SCHEMA = [
     description: 'Access Point and Station configuration',
     fields: [
       { id: 'ap_ssid',        label: 'AP SSID',            type: 'text',   max: 33,  hint: 'Broadcast network name' },
-      { id: 'ap_password',    label: 'AP Password',        type: 'text',   max: 65,  hint: '8-63 chars; leave empty for open AP' },
+      { id: 'ap_password',    label: 'AP Password',        type: 'text',   max: 65,  hint: '8-63 chars; leave empty to keep current password' },
       { id: 'ap_enabled',     label: 'AP Enabled',         type: 'bool' },
       { id: 'sta_ssid',       label: 'STA SSID',           type: 'text',   max: 65,  hint: 'Network to connect to' },
-      { id: 'sta_password',   label: 'STA Password',       type: 'text',   max: 65 },
+      { id: 'sta_password',   label: 'STA Password',       type: 'text',   max: 65,  hint: 'Leave empty to keep current password' },
     ]
   },
   {
@@ -308,7 +308,7 @@ const SETTINGS_SCHEMA = [
     fields: [
       { id: 'portal_url',       label: 'Portal File Path',   type: 'text',   max: 129, hint: 'e.g. /mnt/ghostesp/portals/default.html' },
       { id: 'portal_ssid',      label: 'Portal SSID',        type: 'text',   max: 33 },
-      { id: 'portal_password',  label: 'Portal Password',    type: 'text',   max: 65 },
+      { id: 'portal_password',  label: 'Portal Password',    type: 'text',   max: 65,  hint: 'Leave empty to keep current password' },
       { id: 'portal_ap_ssid',   label: 'Portal AP SSID',     type: 'text',   max: 33,  hint: 'SSID for the portal AP' },
       { id: 'portal_domain',    label: 'Portal Domain',      type: 'text',   max: 65,  hint: 'e.g. ghost.net' },
       { id: 'portal_offline',   label: 'Portal Offline Mode',type: 'bool' },
