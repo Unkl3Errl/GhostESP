@@ -3,9 +3,12 @@
 
 #include "core/commands.h"
 #include "core/glog.h"
+#include "core/scan_saver.h"
 #include "esp_vfs_fat.h"
 #include "managers/sd_card_manager.h"
 #include "managers/status_display_manager.h"
+#include "vendor/GPS/gps_logger.h"
+#include "vendor/pcap.h"
 #include "sdkconfig.h"
 #include "mbedtls/base64.h"
 #include <ctype.h>
@@ -103,6 +106,85 @@ static bool sd_cli_is_number(const char *s) {
     return true;
 }
 
+static bool sd_cli_parse_u64(const char *text, uint64_t *value) {
+    if (!text || !*text || !value) return false;
+    char *end = NULL;
+    unsigned long long parsed = strtoull(text, &end, 10);
+    if (end == text || *end != '\0') return false;
+    *value = (uint64_t)parsed;
+    return true;
+}
+
+static bool sd_cli_parse_crc32(const char *text, uint32_t *value) {
+    if (!text || strlen(text) != 8 || !value) return false;
+    uint32_t parsed = 0;
+    for (size_t i = 0; i < 8; ++i) {
+        unsigned char ch = (unsigned char)text[i];
+        uint32_t nibble;
+        if (ch >= '0' && ch <= '9') nibble = ch - '0';
+        else if (ch >= 'a' && ch <= 'f') nibble = ch - 'a' + 10;
+        else if (ch >= 'A' && ch <= 'F') nibble = ch - 'A' + 10;
+        else return false;
+        parsed = (parsed << 4) | nibble;
+    }
+    *value = parsed;
+    return true;
+}
+
+static bool sd_cli_is_archive_path(const char *path) {
+    static const char root[] = "/mnt/ghostesp";
+    if (!path || strncmp(path, root, sizeof(root) - 1) != 0) return false;
+    const char tail = path[sizeof(root) - 1];
+    if (tail != '/' || path[sizeof(root)] == '\0') return false;
+    const char *segment = path + sizeof(root);
+    while (*segment) {
+        const char *end = strchr(segment, '/');
+        size_t length = end ? (size_t)(end - segment) : strlen(segment);
+        if ((length == 1 && segment[0] == '.') ||
+            (length == 2 && segment[0] == '.' && segment[1] == '.')) {
+            return false;
+        }
+        if (!end) break;
+        segment = end + 1;
+    }
+    return true;
+}
+
+static uint32_t sd_cli_crc32_update(uint32_t crc, const uint8_t *data, size_t length) {
+    while (length--) {
+        crc ^= *data++;
+        for (unsigned bit = 0; bit < 8; ++bit) {
+            crc = (crc >> 1) ^ (0xEDB88320U & (uint32_t)-(int32_t)(crc & 1U));
+        }
+    }
+    return crc;
+}
+
+static bool sd_cli_file_crc32(const char *path, uint64_t *size, uint32_t *checksum) {
+    if (!path || !size || !checksum) return false;
+    FILE *file = fopen(path, "rb");
+    if (!file) return false;
+
+    uint8_t buffer[1024];
+    uint64_t total = 0;
+    uint32_t crc = 0xFFFFFFFFU;
+    size_t received;
+    while ((received = fread(buffer, 1, sizeof(buffer), file)) > 0) {
+        crc = sd_cli_crc32_update(crc, buffer, received);
+        total += received;
+    }
+    const bool ok = !ferror(file) && fclose(file) == 0;
+    if (!ok) return false;
+    *size = total;
+    *checksum = crc ^ 0xFFFFFFFFU;
+    return true;
+}
+
+static bool sd_cli_file_is_active(const char *path) {
+    return pcap_file_is_active_path(path) || csv_file_is_active_path(path) ||
+           scan_file_is_active_path(path);
+}
+
 static const char *sd_cli_resolve_path(const char *arg, char *buf, size_t bufsize) {
     if (sd_cli_is_number(arg) && g_sd_cli_count > 0) {
         int idx = atoi(arg);
@@ -127,6 +209,10 @@ static bool sd_cli_display_suspended = false;
 
 static bool sd_cli_ensure_mounted(void) {
     if (sd_card_manager.is_initialized) return true;
+#if defined(CONFIG_IS_S3TWATCH) || defined(CONFIG_HELTEC_ANDROID_STORAGE)
+    /* Recover from a transient/deferred boot mount failure on demand. */
+    if (sd_card_init() == ESP_OK) return true;
+#endif
 #ifdef CONFIG_BUILD_CONFIG_TEMPLATE
     if (strcmp(CONFIG_BUILD_CONFIG_TEMPLATE, "somethingsomething") == 0) {
         if (sd_card_mount_for_flush(&sd_cli_display_suspended) == ESP_OK) {
@@ -160,11 +246,13 @@ void handle_sd_cmd(int argc, char **argv) {
         glog("  sd list [path]                   - List files/dirs with indices\n");
         glog("  sd info <idx|path>               - Show file/dir info\n");
         glog("  sd size <idx|path>               - Get file size\n");
+        glog("  sd crc32 <idx|path>              - Get file size and CRC-32\n");
         glog("  sd read <idx|path> [off] [len] [--base64] - Read file (offset, length)\n");
         glog("  sd write <path> <base64>         - Write base64 data to file\n");
         glog("  sd append <path> <base64>        - Append base64 data to file\n");
         glog("  sd mkdir <path>                  - Create directory\n");
         glog("  sd rm <idx|path>                 - Delete file or empty directory\n");
+        glog("  sd ack <path> <size> <crc32>     - Verify then release an archived file\n");
         glog("  sd tree [path] [depth]           - Recursive listing\n");
         return;
     }
@@ -196,6 +284,7 @@ void handle_sd_cmd(int argc, char **argv) {
             glog("SD:STATUS:free_mb=%llu\n", (unsigned long long)(free_bytes / (1024 * 1024)));
             glog("SD:STATUS:used_pct=%d\n", (int)(((total - free_bytes) * 100) / total));
         }
+        glog("SD:OK\n");
         sd_cli_cleanup();
         return;
     }
@@ -234,10 +323,12 @@ void handle_sd_cmd(int argc, char **argv) {
             struct stat st;
             bool is_dir = false;
             long fsize = 0;
+            long long modified = 0;
 
             if (stat(fullpath, &st) == 0) {
                 is_dir = S_ISDIR(st.st_mode);
                 fsize = is_dir ? 0 : (long)st.st_size;
+                modified = (long long)st.st_mtime;
             } else if (entry->d_type == DT_DIR) {
                 is_dir = true;
             }
@@ -252,7 +343,7 @@ void handle_sd_cmd(int argc, char **argv) {
             if (is_dir) {
                 glog("SD:DIR:[%d] %s\n", idx, entry->d_name);
             } else {
-                glog("SD:FILE:[%d] %s %ld\n", idx, entry->d_name, fsize);
+                glog("SD:FILE:[%d] %s %ld %lld\n", idx, entry->d_name, fsize, modified);
             }
         }
         closedir(d);
@@ -475,6 +566,16 @@ void handle_sd_cmd(int argc, char **argv) {
             strncpy(path, write_path, sizeof(path) - 1);
             path[sizeof(path) - 1] = '\0';
         }
+        if (!sd_cli_is_archive_path(path)) {
+            glog("SD:ERR:invalid_path\n");
+            sd_cli_cleanup();
+            return;
+        }
+        if (sd_cli_file_is_active(path)) {
+            glog("SD:ERR:active_file:%s\n", path);
+            sd_cli_cleanup();
+            return;
+        }
 
         const char *b64data = argv[3];
         size_t b64len = strlen(b64data);
@@ -535,6 +636,16 @@ void handle_sd_cmd(int argc, char **argv) {
         } else {
             strncpy(path, append_path, sizeof(path) - 1);
             path[sizeof(path) - 1] = '\0';
+        }
+        if (!sd_cli_is_archive_path(path)) {
+            glog("SD:ERR:invalid_path\n");
+            sd_cli_cleanup();
+            return;
+        }
+        if (sd_cli_file_is_active(path)) {
+            glog("SD:ERR:active_file:%s\n", path);
+            sd_cli_cleanup();
+            return;
         }
 
         const char *b64data = argv[3];
@@ -605,6 +716,103 @@ void handle_sd_cmd(int argc, char **argv) {
         return;
     }
 
+    if (strcmp(sub, "crc32") == 0) {
+        if (!sd_cli_ensure_mounted()) {
+            glog("SD:ERR:not_mounted\n");
+            sd_cli_cleanup();
+            return;
+        }
+        if (argc < 3) {
+            glog("SD:ERR:missing_path\n");
+            sd_cli_cleanup();
+            return;
+        }
+        const char *resolved = sd_cli_resolve_path(argv[2], path, sizeof(path));
+        if (!resolved || !sd_cli_is_archive_path(resolved)) {
+            glog("SD:ERR:invalid_path\n");
+            sd_cli_cleanup();
+            return;
+        }
+        if (sd_cli_file_is_active(resolved)) {
+            glog("SD:ERR:active_file:%s\n", resolved);
+            sd_cli_cleanup();
+            return;
+        }
+        uint64_t size = 0;
+        uint32_t checksum = 0;
+        if (!sd_cli_file_crc32(resolved, &size, &checksum)) {
+            glog("SD:ERR:cannot_checksum:%s\n", resolved);
+            sd_cli_cleanup();
+            return;
+        }
+        if (sd_cli_file_is_active(resolved)) {
+            glog("SD:ERR:active_file:%s\n", resolved);
+            sd_cli_cleanup();
+            return;
+        }
+        glog("SD:CRC32:%08lX\n", (unsigned long)checksum);
+        glog("SD:CRC32:SIZE:%llu\n", (unsigned long long)size);
+        glog("SD:OK\n");
+        sd_cli_cleanup();
+        return;
+    }
+
+    if (strcmp(sub, "ack") == 0) {
+        if (!sd_cli_ensure_mounted()) {
+            glog("SD:ERR:not_mounted\n");
+            sd_cli_cleanup();
+            return;
+        }
+        if (argc != 5) {
+            glog("SD:ERR:usage: sd ack <path> <size> <crc32>\n");
+            sd_cli_cleanup();
+            return;
+        }
+        const char *resolved = sd_cli_resolve_path(argv[2], path, sizeof(path));
+        uint64_t expected_size = 0;
+        uint32_t expected_checksum = 0;
+        if (!resolved || !sd_cli_is_archive_path(resolved) ||
+            !sd_cli_parse_u64(argv[3], &expected_size) ||
+            !sd_cli_parse_crc32(argv[4], &expected_checksum)) {
+            glog("SD:ERR:invalid_ack\n");
+            sd_cli_cleanup();
+            return;
+        }
+        if (sd_cli_file_is_active(resolved)) {
+            glog("SD:ERR:active_file:%s\n", resolved);
+            sd_cli_cleanup();
+            return;
+        }
+        uint64_t actual_size = 0;
+        uint32_t actual_checksum = 0;
+        if (!sd_cli_file_crc32(resolved, &actual_size, &actual_checksum)) {
+            glog("SD:ERR:cannot_checksum:%s\n", resolved);
+            sd_cli_cleanup();
+            return;
+        }
+        if (actual_size != expected_size || actual_checksum != expected_checksum) {
+            glog("SD:ERR:ack_mismatch\n");
+            sd_cli_cleanup();
+            return;
+        }
+        if (sd_cli_file_is_active(resolved)) {
+            glog("SD:ERR:active_file:%s\n", resolved);
+            sd_cli_cleanup();
+            return;
+        }
+        if (unlink(resolved) != 0) {
+            glog("SD:ERR:release_failed:%s\n", resolved);
+            sd_cli_cleanup();
+            return;
+        }
+        glog("SD:ACK:path=%s\n", resolved);
+        glog("SD:ACK:size=%llu\n", (unsigned long long)actual_size);
+        glog("SD:ACK:crc32=%08lX\n", (unsigned long)actual_checksum);
+        glog("SD:OK\n");
+        sd_cli_cleanup();
+        return;
+    }
+
     if (strcmp(sub, "mkdir") == 0) {
         if (!sd_cli_ensure_mounted()) {
             glog("SD:ERR:not_mounted\n");
@@ -643,8 +851,14 @@ void handle_sd_cmd(int argc, char **argv) {
             return;
         }
         const char *resolved = sd_cli_resolve_path(argv[2], path, sizeof(path));
-        if (!resolved) {
-            glog("SD:ERR:invalid_index\n");
+        if (!resolved || !sd_cli_is_archive_path(resolved)) {
+            glog("SD:ERR:invalid_path\n");
+            sd_cli_cleanup();
+            return;
+        }
+        if (sd_cli_file_is_active(resolved)) {
+            glog("SD:ERR:active_file:%s\n", resolved);
+            sd_cli_cleanup();
             return;
         }
 

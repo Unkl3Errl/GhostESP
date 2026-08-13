@@ -36,11 +36,13 @@ def main():
         from csscompressor import compress as css_compress
         import rjsmin as jsmin
     except ImportError:
-        print("Error: Required libraries not found. Installing them now...")
-        install_dependencies()
-        from htmlmin import minify as html_minify
-        from csscompressor import compress as css_compress
-        import rjsmin as jsmin
+        # build.mjs already compacts and bundles the source. Keep header
+        # generation usable on current Python versions where the legacy
+        # htmlmin package no longer imports (it depends on removed stdlib cgi).
+        print("Optional legacy minifiers unavailable; using bundled HTML as-is.")
+        html_minify = None
+        css_compress = None
+        jsmin = None
 
     try:
         with open(html_path, 'r', encoding='utf-8') as f:
@@ -51,19 +53,24 @@ def main():
 
     print(f"Original HTML size: {len(html_content)} bytes")
 
-    try:
-        htmlmin_safe = html_minify(html_content,
-                                   remove_comments=True,
-                                   remove_empty_space=True,
-                                   remove_all_empty_space=False,
-                                   reduce_boolean_attributes=True)
-    except Exception as e:
-        print(f"Warning: Error minifying HTML: {e}")
+    if html_minify is not None:
+        try:
+            htmlmin_safe = html_minify(html_content,
+                                       remove_comments=True,
+                                       remove_empty_space=True,
+                                       remove_all_empty_space=False,
+                                       reduce_boolean_attributes=True)
+        except Exception as e:
+            print(f"Warning: Error minifying HTML: {e}")
+            htmlmin_safe = html_content
+    else:
         htmlmin_safe = html_content
 
     def minify_css(match):
         css_content = match.group(1)
         try:
+            if css_compress is None:
+                return match.group(0)
             minified = css_compress(css_content)
             return f"<style>{minified}</style>"
         except Exception as e:
@@ -75,6 +82,8 @@ def main():
     def minify_js(match):
         js_content = match.group(1)
         try:
+            if jsmin is None:
+                return match.group(0)
             minified = jsmin.jsmin(js_content)
             return f"<script>{minified}</script>"
         except Exception as e:

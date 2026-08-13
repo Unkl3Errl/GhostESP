@@ -88,7 +88,11 @@ int serial_manager_write_bytes(const void *data, size_t len) {
   }
 
 #if JTAG_SUPPORTED
-  usb_serial_jtag_write_bytes((const uint8_t *)data, (uint32_t)len, 0);
+  int usb_written =
+      usb_serial_jtag_write_bytes((const uint8_t *)data, (uint32_t)len, 0);
+  if (usb_written > written) {
+    written = usb_written;
+  }
 #endif
 
   return written;

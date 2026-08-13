@@ -512,7 +512,7 @@ void sd_card_get_cached_stats(sd_card_cached_stats_t *out) {
     }
 }
 
-#ifdef CONFIG_IS_S3TWATCH
+#if defined(CONFIG_IS_S3TWATCH) || defined(CONFIG_HELTEC_ANDROID_STORAGE)
 static wl_handle_t s_wl_handle = WL_INVALID_HANDLE;
 static bool s_virtual_storage_mounted = false;
 
@@ -537,8 +537,13 @@ static esp_err_t mount_virtual_storage(void) {
     }
 
     esp_vfs_fat_mount_config_t mount_config = {
+        /* A valid spool is mounted unchanged. If this reserved partition holds
+         * incompatible bytes from an older layout, ESP-IDF formats it within
+         * this same mount operation. Do not split this into two mount calls:
+         * the first failed call can leave the WL layer attached and make the
+         * retry fail with ESP_ERR_INVALID_STATE. */
         .format_if_mount_failed = true,
-        .max_files = 3,
+        .max_files = 12,
         .allocation_unit_size = 4 * 1024
     };
 
@@ -655,8 +660,8 @@ esp_err_t sd_card_init(void) {
   sd_card_manager.card = NULL;
 
 
-#ifdef CONFIG_IS_S3TWATCH
-  ESP_LOGI(TAG, "S3TWatch detected - attempting virtual storage mount");
+#if defined(CONFIG_IS_S3TWATCH) || defined(CONFIG_HELTEC_ANDROID_STORAGE)
+  ESP_LOGI(TAG, "Attempting virtual storage mount");
   
   vTaskDelay(pdMS_TO_TICKS(100));
   
@@ -1326,7 +1331,7 @@ void sd_card_jit_end(bool display_was_suspended) {
 }
 
 void sd_card_unmount_with_context(sd_unmount_context_t context) {
-#ifdef CONFIG_IS_S3TWATCH
+#if defined(CONFIG_IS_S3TWATCH) || defined(CONFIG_HELTEC_ANDROID_STORAGE)
   if (s_virtual_storage_mounted) {
     unmount_virtual_storage();
     sd_card_manager.is_initialized = false;
@@ -1872,11 +1877,11 @@ read_error:
 }
 
 void sd_card_print_config() {
-#ifdef CONFIG_IS_S3TWATCH
+#if defined(CONFIG_IS_S3TWATCH) || defined(CONFIG_HELTEC_ANDROID_STORAGE)
   if (s_virtual_storage_mounted) {
-    printf("Storage Configuration: Virtual Flash Storage (S3TWatch)\n");
+    printf("Storage Configuration: Virtual Flash Storage\n");
     printf("Mount Point: /mnt\n");
-    printf("Storage Type: Internal Flash Partition (4MB)\n");
+    printf("Storage Type: Internal Flash FAT Partition\n");
     
     const esp_partition_t* storage_partition = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, "storage");
     if (storage_partition) {
@@ -1903,7 +1908,7 @@ void sd_card_print_config() {
 }
 
 bool sd_card_is_virtual_storage() {
-#ifdef CONFIG_IS_S3TWATCH
+#if defined(CONFIG_IS_S3TWATCH) || defined(CONFIG_HELTEC_ANDROID_STORAGE)
   return s_virtual_storage_mounted;
 #else
   return false;
