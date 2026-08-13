@@ -61,6 +61,7 @@ esp_err_t pcap_write_packet_to_buffer(const void *packet, size_t length,
                                       pcap_capture_type_t capture_type);
 esp_err_t pcap_flush_buffer_to_file();
 bool pcap_is_capturing(void);
+bool pcap_file_is_active_path(const char *path);
 bool pcap_is_wireshark_mode(void);
 bool pcap_auto_flush_enabled(void);
 void pcap_file_close();

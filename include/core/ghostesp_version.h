@@ -3,7 +3,7 @@
 
 #define GHOSTESP_NAME "GhostESP"
 #define GHOSTESP_FLAVOR "Revival"
-#define GHOSTESP_VERSION "v2.1"
+#define GHOSTESP_VERSION "v2.1.0-mobile.3"
 
 // GIT_COMMIT_HASH and GIT_BRANCH are defined as compile definitions in CMakeLists.txt
 
