@@ -1,8 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import zlib from 'node:zlib';
 
-const root = path.dirname(new URL(import.meta.url).pathname).replace(/^\/(.:)/, '$1');
+const root = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(root, '..');
 const sourceDir = path.join(root, 'src');
 const indexPath = path.join(sourceDir, 'index.html');

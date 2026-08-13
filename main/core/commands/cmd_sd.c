@@ -209,6 +209,10 @@ static bool sd_cli_display_suspended = false;
 
 static bool sd_cli_ensure_mounted(void) {
     if (sd_card_manager.is_initialized) return true;
+#if defined(CONFIG_IS_S3TWATCH) || defined(CONFIG_HELTEC_ANDROID_STORAGE)
+    /* Recover from a transient/deferred boot mount failure on demand. */
+    if (sd_card_init() == ESP_OK) return true;
+#endif
 #ifdef CONFIG_BUILD_CONFIG_TEMPLATE
     if (strcmp(CONFIG_BUILD_CONFIG_TEMPLATE, "somethingsomething") == 0) {
         if (sd_card_mount_for_flush(&sd_cli_display_suspended) == ESP_OK) {

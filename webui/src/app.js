@@ -289,7 +289,7 @@ async function badusbRefreshScripts(showToastOnError) {
       sel.appendChild(opt);
     }
   } catch (e) {
-    sel.innerHTML = '<option disabled>SD card unavailable</option>';
+    sel.innerHTML = '<option disabled>Device storage unavailable</option>';
     if (showToastOnError) toast('Could not list scripts: ' + e.message, 'bad');
   }
 }
@@ -1403,7 +1403,7 @@ async function saveSettings() {
         const el = $(field.id);
         if (!el) continue;
         if (field.type === 'bool') payload[field.id] = el.checked;
-        else if (field.type === 'number') payload[field.id] = parseFloat(el.value) || 0;
+        else if (field.type === 'number' || field.type === 'enum') payload[field.id] = parseFloat(el.value) || 0;
         else payload[field.id] = el.value;
       }
     }
@@ -1624,7 +1624,7 @@ async function loadFiles(showErrors = true) {
   list.innerHTML = '<div class="skeleton skeleton-row"></div><div class="skeleton skeleton-row"></div><div class="skeleton skeleton-row"></div>';
   try {
     const res = await api('/api/sdcard?path=' + encodeURIComponent(state.currentPath));
-    if (!res.ok) throw new Error('SD card unavailable');
+    if (!res.ok) throw new Error('Device storage unavailable');
     const data = await res.json();
     state.currentPath = data.path || state.currentPath;
     $('file-path').textContent = state.currentPath;
@@ -1635,7 +1635,7 @@ async function loadFiles(showErrors = true) {
     const files = data.files || [];
     list.innerHTML = files.length ? files.map(fileRow).join('') : '<div class="empty">This folder is empty.</div>';
   } catch (err) {
-    list.innerHTML = '<div class="empty">SD card not accessible.<br><small>Check that an SD card is inserted and the configured pins match your board. Run <code>sd status</code> in the Terminal to verify.</small></div>';
+    list.innerHTML = '<div class="empty">Device storage is not accessible.<br><small>Run <code>sd status</code> in the Terminal to verify the internal storage volume.</small></div>';
     if (showErrors) toast(err.message, 'bad');
   }
 }
