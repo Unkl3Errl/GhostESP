@@ -546,6 +546,14 @@ menu "Ghost ESP Options"
             help
                 Enable configuration for S3TWatch with virtual flash storage.
 
+        config HELTEC_ANDROID_STORAGE
+            bool "Use internal flash as Android-synchronized storage"
+            default n
+            help
+                Mount a wear-levelled FAT partition as the SD filesystem. The
+                Heltec Android controller mirrors this virtual SD over USB, so
+                boards without a card slot retain captures while disconnected.
+
         config HAS_DRV2605_HAPTICS
             bool "Enable DRV2605 Haptics"
             default y if IS_S3TWATCH
