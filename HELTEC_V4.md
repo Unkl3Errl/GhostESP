@@ -46,8 +46,11 @@ The GitHub workflow packages `HeltecV4.zip` with `bootloader.bin`,
 ## Android-backed storage
 
 The Heltec V4 target uses a 12 MB wear-levelled FAT partition in internal flash
-as its virtual SD card. Captures, wardriving CSV files, and saved scan results
-are split into approximately 128 KiB closed segments. HeltecController 0.8.4 or
+as its virtual SD card. That layout is isolated in
+`partitions_heltecv4.csv`; other board configurations retain the shared
+partition table appropriate to their flash size. Captures, wardriving CSV
+files, and saved scan results are split into approximately 128 KiB closed
+segments. HeltecController 0.8.4 or
 newer can copy those closed files to a user-selected Android folder over USB,
 verify their exact byte count and CRC-32, and then acknowledge them. GhostESP
 does not release a source file until that acknowledgement matches.
