@@ -1,35 +1,34 @@
 # Upstream completeness audit
 
-Audit date: 2026-08-09
+Audit date: 2026-08-13
 
 ## Source identity
 
 | Item | Value |
 | --- | --- |
 | Upstream repository | `https://github.com/GhostESP-Revival/GhostESP.git` |
-| Upstream branch | `Development-deki` |
-| Audited upstream commit | `8e3be0579a237f3df733d57496c66da27e35e776` |
-| Remote branch head at audit time | `8e3be0579a237f3df733d57496c66da27e35e776` |
-| Local adaptation branch | `agent/heltec-v4` |
+| Upstream release | `v2.1` (stable) |
+| Audited upstream commit | `9151548e8d841afb38f97ac9bc31d4e33e71a243` |
+| Local adaptation branch | `agent/ghostesp-2.1-mobile.5-stable` |
 | Upstream tracked paths | 4,258 |
 | Deleted upstream paths | **0** |
 
-The local branch begins directly at the audited upstream commit. The complete
-upstream tracked tree remains present. The Heltec V4 adaptation changes seven
-tracked files and originally adds two board-specific files; this audit report
-is an additional documentation file.
+The local branch begins directly at the audited stable tag. The complete
+upstream tracked tree remains present. The V4 adaptation modifies 25 tracked
+files and adds four board-specific or provenance files.
 
 ## Intentional tracked changes
 
 | Path | Purpose |
 | --- | --- |
-| `.github/workflows/compile_all.yml` | Add the `HeltecV4.zip` CI build target. |
-| `README.md` | Add Heltec V4 to the upstream support matrix. |
+| `.github/workflows/compile_all.yml`, `README.md` | Add the `HeltecV4.zip` CI target and support-matrix row. |
 | `components/esp_audio_codec/CMakeLists.txt` | Avoid an incompatible redundant library search path under ESP-IDF 6.0. |
-| `main/Kconfig.projbuild` | Add optional board-controlled GPS power configuration. |
-| `main/managers/gps_manager.c` | Enable and disable an active-level-configurable onboard GPS supply. |
-| `main/core/serial_manager.c` | Count successful USB Serial/JTAG writes in the shared output path. |
-| `main/core/glog.c` | Deliver CLI results through the shared UART and USB Serial/JTAG output manager. |
+| `configs/sdkconfig.heltecv4`, `main/Kconfig.projbuild`, `main/managers/gps_manager.c` | Configure the V4 hardware, display, USB console, GNSS, and virtual storage. |
+| `main/core/glog.c`, `main/core/serial_manager.c` | Deliver CLI output through USB Serial/JTAG. |
+| `main/core/commands/cmd_sd.c`, capture writers and headers | Segment captures and expose CRC-verified archive acknowledgement without releasing active files. |
+| `main/managers/sd_card_manager.c`, partition tables | Mount a V4-only 12 MB wear-levelled FAT spool and preserve nonblank mount failures for recovery. |
+| `main/managers/ap_manager.c`, `webui/`, embedded Web UI header | Persist settings correctly and serve the matching rebuilt Web UI. |
+| `include/core/ghostesp_version.h`, `CHANGELOG.md`, `HELTEC_V4.md` | Identify and document the mobile release. |
 
 ## Added board files
 
@@ -46,18 +45,13 @@ is an additional documentation file.
 - `git fsck --no-dangling --no-progress` reported no repository errors.
 - The retained Doom example submodule resolves to
   `f64baf56a852a29be7107e7da3b19cd10feae48a`.
-- The Heltec V4 firmware built successfully with ESP-IDF 6.0.
-- The hardware-validation application image `build/Ghost_ESP_IDF.bin`, built
-  from this source state before the final source commit, has SHA-256:
-  `4dc63c6b9ea14c8c3ee1e1f2577629fb45f9c9b6498ebc411e5b1446d0dc0986`.
-- The flashed application image was verified byte-for-byte by the ESP-IDF
-  flashing tools after programming.
+- Build and hardware verification are recorded with the release artifacts.
 
 ## Reproduce the source audit
 
 ```sh
-base=8e3be0579a237f3df733d57496c66da27e35e776
-git ls-remote origin refs/heads/Development-deki
+base=9151548e8d841afb38f97ac9bc31d4e33e71a243
+git ls-remote origin refs/tags/v2.1
 git ls-tree -r --name-only "$base" | wc -l
 git diff --name-status "$base" --
 git diff --diff-filter=D --name-only "$base" --
