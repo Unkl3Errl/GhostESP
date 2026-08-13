@@ -1415,162 +1415,106 @@ static esp_err_t api_settings_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
-    // Update settings
+    // Update settings using the same keys exposed by the Web UI schema and GET
+    // response. Password fields are write-only: an empty value leaves the
+    // existing secret unchanged when the complete form is submitted.
     FSettings *settings = &G_Settings;
+    cJSON *item = NULL;
 
-    // Core settings
-    cJSON *broadcast_speed = cJSON_GetObjectItem(root, "broadcast_speed");
-    if (broadcast_speed) {
-        settings_set_broadcast_speed(settings, broadcast_speed->valueint);
-    }
+#define JSON_ITEM(name) cJSON_GetObjectItemCaseSensitive(root, (name))
+#define APPLY_BOOL(name, setter) do { item = JSON_ITEM(name); if (cJSON_IsBool(item)) setter(settings, cJSON_IsTrue(item)); } while (0)
+#define APPLY_NUMBER(name, setter, cast_type) do { item = JSON_ITEM(name); if (cJSON_IsNumber(item)) setter(settings, (cast_type)item->valuedouble); } while (0)
+#define APPLY_STRING(name, setter) do { item = JSON_ITEM(name); if (cJSON_IsString(item) && item->valuestring) setter(settings, item->valuestring); } while (0)
 
-    cJSON *ap_ssid = cJSON_GetObjectItem(root, "ap_ssid");
-    if (cJSON_IsString(ap_ssid) && ap_ssid->valuestring) {
-        settings_set_ap_ssid(settings, ap_ssid->valuestring);
-    }
-
-    cJSON *ap_password = cJSON_GetObjectItem(root, "ap_password");
-    if (cJSON_IsString(ap_password) && ap_password->valuestring) {
-        size_t ap_password_len = strlen(ap_password->valuestring);
-        if (ap_password_len > 0 && (ap_password_len < 8 || ap_password_len > 63)) {
+    APPLY_STRING("ap_ssid", settings_set_ap_ssid);
+    item = JSON_ITEM("ap_password");
+    if (cJSON_IsString(item) && item->valuestring && item->valuestring[0] != '\0') {
+        size_t password_len = strlen(item->valuestring);
+        if (password_len < 8 || password_len > 63) {
             cJSON_Delete(root);
             httpd_resp_set_status(req, "400 Bad Request");
             httpd_resp_set_type(req, "application/json");
-            httpd_resp_sendstr(req, "{\"error\": \"AP password must be empty or 8-63 characters.\"}");
+            httpd_resp_sendstr(req, "{\"error\":\"AP password must be 8-63 characters\"}");
             return ESP_FAIL;
         }
-        if (ap_password_len > 0) {
-            settings_set_ap_password(settings, ap_password->valuestring);
-        }
+        settings_set_ap_password(settings, item->valuestring);
+    }
+    APPLY_BOOL("ap_enabled", settings_set_ap_enabled);
+    APPLY_STRING("sta_ssid", settings_set_sta_ssid);
+    item = JSON_ITEM("sta_password");
+    if (cJSON_IsString(item) && item->valuestring && item->valuestring[0] != '\0') {
+        settings_set_sta_password(settings, item->valuestring);
     }
 
-    cJSON *rgb_mode = cJSON_GetObjectItem(root, "rainbow_mode");
-    if (cJSON_IsBool(rgb_mode)) {
-        bool rgb_mode_value = cJSON_IsTrue(rgb_mode);
-        printf("Debug: Passed rgb_mode_value = %d to settings_set_rgb_mode()\n", rgb_mode_value);
-        settings_set_rgb_mode(settings, (RGBMode)rgb_mode_value);
-    } else {
-        glog("Error: 'rgb_mode' is not a boolean.\n");
+    APPLY_STRING("portal_url", settings_set_portal_url);
+    APPLY_STRING("portal_ssid", settings_set_portal_ssid);
+    item = JSON_ITEM("portal_password");
+    if (cJSON_IsString(item) && item->valuestring && item->valuestring[0] != '\0') {
+        settings_set_portal_password(settings, item->valuestring);
     }
+    APPLY_STRING("portal_ap_ssid", settings_set_portal_ap_ssid);
+    APPLY_STRING("portal_domain", settings_set_portal_domain);
+    APPLY_BOOL("portal_offline", settings_set_portal_offline_mode);
 
-    cJSON *rgb_speed = cJSON_GetObjectItem(root, "rgb_speed");
-    if (rgb_speed) {
-        settings_set_rgb_speed(settings, rgb_speed->valueint);
-    }
+    APPLY_STRING("printer_ip", settings_set_printer_ip);
+    APPLY_STRING("printer_text", settings_set_printer_text);
+    APPLY_NUMBER("printer_font_size", settings_set_printer_font_size, uint8_t);
+    APPLY_NUMBER("printer_alignment", settings_set_printer_alignment, PrinterAlignment);
 
-    cJSON *neopixel_brightness = cJSON_GetObjectItem(root, "neopixel_brightness");
-    if (neopixel_brightness) {
-        settings_set_neopixel_max_brightness(settings, (uint8_t)neopixel_brightness->valueint);
+    APPLY_NUMBER("display_timeout", settings_set_display_timeout, uint32_t);
+    APPLY_NUMBER("max_bright", settings_set_max_screen_brightness, uint8_t);
+    APPLY_BOOL("invert_colors", settings_set_invert_colors);
+    item = JSON_ITEM("terminal_color");
+    if (cJSON_IsString(item) && item->valuestring) {
+        const char *hex = item->valuestring;
+        if (*hex == '#') ++hex;
+        settings_set_terminal_text_color(settings, (uint32_t)strtoul(hex, NULL, 16));
     }
+    APPLY_NUMBER("menu_theme", settings_set_menu_theme, uint8_t);
 
-    cJSON *channel_delay = cJSON_GetObjectItem(root, "channel_delay");
-    if (channel_delay) {
-        settings_set_channel_delay(settings, (float)channel_delay->valuedouble);
+    APPLY_NUMBER("rgb_mode", settings_set_rgb_mode, RGBMode);
+    APPLY_NUMBER("rgb_speed", settings_set_rgb_speed, uint8_t);
+    APPLY_NUMBER("rgb_data_pin", settings_set_rgb_data_pin, int32_t);
+    item = JSON_ITEM("rgb_red_pin");
+    cJSON *green = JSON_ITEM("rgb_green_pin");
+    cJSON *blue = JSON_ITEM("rgb_blue_pin");
+    if (cJSON_IsNumber(item) && cJSON_IsNumber(green) && cJSON_IsNumber(blue)) {
+        settings_set_rgb_separate_pins(settings, item->valueint, green->valueint, blue->valueint);
     }
+    APPLY_NUMBER("neopixel_bright", settings_set_neopixel_max_brightness, uint8_t);
 
-    // Evil Portal settings
-    cJSON *portal_url = cJSON_GetObjectItem(root, "portal_url");
-    if (cJSON_IsString(portal_url) && portal_url->valuestring) {
-        settings_set_portal_url(settings, portal_url->valuestring);
-    }
+    APPLY_NUMBER("broadcast_speed", settings_set_broadcast_speed, uint16_t);
+    APPLY_NUMBER("gps_rx_pin", settings_set_gps_rx_pin, uint8_t);
+    APPLY_NUMBER("channel_delay", settings_set_channel_delay, float);
+    APPLY_BOOL("power_save", settings_set_power_save_enabled);
+    APPLY_BOOL("zebra_menus", settings_set_zebra_menus_enabled);
+    APPLY_BOOL("nav_buttons", settings_set_nav_buttons_enabled);
+    APPLY_NUMBER("menu_layout", settings_set_menu_layout, uint8_t);
+    APPLY_BOOL("infrared_easy", settings_set_infrared_easy_mode);
+    APPLY_BOOL("web_auth", settings_set_web_auth_enabled);
+    APPLY_BOOL("rts_enabled", settings_set_rts_enabled);
+    APPLY_BOOL("third_ctrl", settings_set_thirds_control_enabled);
+    APPLY_BOOL("auto_save_scans", settings_set_auto_save_scans);
 
-    cJSON *portal_ssid = cJSON_GetObjectItem(root, "portal_ssid");
-    if (cJSON_IsString(portal_ssid) && portal_ssid->valuestring) {
-        settings_set_portal_ssid(settings, portal_ssid->valuestring);
-    }
+    int32_t tx_pin = settings->esp_comm_tx_pin;
+    int32_t rx_pin = settings->esp_comm_rx_pin;
+    item = JSON_ITEM("esp_comm_tx_pin");
+    if (cJSON_IsNumber(item)) tx_pin = item->valueint;
+    item = JSON_ITEM("esp_comm_rx_pin");
+    if (cJSON_IsNumber(item)) rx_pin = item->valueint;
+    settings_set_esp_comm_pins(settings, tx_pin, rx_pin);
 
-    cJSON *portal_password = cJSON_GetObjectItem(root, "portal_password");
-    if (cJSON_IsString(portal_password) && portal_password->valuestring) {
-        if (portal_password->valuestring[0] != '\0') {
-            settings_set_portal_password(settings, portal_password->valuestring);
-        }
-    }
+    APPLY_STRING("flappy_name", settings_set_flappy_ghost_name);
+    APPLY_STRING("timezone", settings_set_timezone_str);
+    APPLY_STRING("accent_color", settings_set_accent_color_str);
+    APPLY_STRING("io_btn_p10_cmd", settings_set_io_btn_p10_cmd);
+    APPLY_STRING("io_btn_p11_cmd", settings_set_io_btn_p11_cmd);
+    APPLY_STRING("io_btn_p12_cmd", settings_set_io_btn_p12_cmd);
 
-    cJSON *portal_ap_ssid = cJSON_GetObjectItem(root, "portal_ap_ssid");
-    if (cJSON_IsString(portal_ap_ssid) && portal_ap_ssid->valuestring) {
-        settings_set_portal_ap_ssid(settings, portal_ap_ssid->valuestring);
-    }
-
-    cJSON *portal_domain = cJSON_GetObjectItem(root, "portal_domain");
-    if (cJSON_IsString(portal_domain) && portal_domain->valuestring) {
-        settings_set_portal_domain(settings, portal_domain->valuestring);
-    }
-
-    cJSON *portal_offline_mode = cJSON_GetObjectItem(root, "portal_offline_mode");
-    if (portal_offline_mode) {
-        settings_set_portal_offline_mode(settings, portal_offline_mode->valueint != 0);
-    }
-
-    // Power Printer settings
-    cJSON *printer_ip = cJSON_GetObjectItem(root, "printer_ip");
-    if (cJSON_IsString(printer_ip) && printer_ip->valuestring) {
-        settings_set_printer_ip(settings, printer_ip->valuestring);
-    }
-
-    cJSON *printer_text = cJSON_GetObjectItem(root, "printer_text");
-    if (cJSON_IsString(printer_text) && printer_text->valuestring) {
-        settings_set_printer_text(settings, printer_text->valuestring);
-    }
-
-    cJSON *printer_font_size = cJSON_GetObjectItem(root, "printer_font_size");
-    if (printer_font_size) {
-        printf("PRINTER FONT SIZE %i", printer_font_size->valueint);
-        settings_set_printer_font_size(settings, printer_font_size->valueint);
-    }
-
-    cJSON *printer_alignment = cJSON_GetObjectItem(root, "printer_alignment");
-    if (printer_alignment) {
-        printf("printer_alignment %i", printer_alignment->valueint);
-        settings_set_printer_alignment(settings, (PrinterAlignment)printer_alignment->valueint);
-    }
-
-    cJSON *flappy_ghost_name = cJSON_GetObjectItem(root, "flappy_ghost_name");
-    if (cJSON_IsString(flappy_ghost_name) && flappy_ghost_name->valuestring) {
-        settings_set_flappy_ghost_name(settings, flappy_ghost_name->valuestring);
-    }
-
-    cJSON *time_zone_str_name = cJSON_GetObjectItem(root, "timezone_str");
-    if (cJSON_IsString(time_zone_str_name) && time_zone_str_name->valuestring) {
-        settings_set_timezone_str(settings, time_zone_str_name->valuestring);
-    }
-
-    cJSON *hex_accent_color_str = cJSON_GetObjectItem(root, "hex_accent_color");
-    if (cJSON_IsString(hex_accent_color_str) && hex_accent_color_str->valuestring) {
-        settings_set_accent_color_str(settings, hex_accent_color_str->valuestring);
-    }
-
-    cJSON *rts_enabled_bool = cJSON_GetObjectItem(root, "rts_enabled");
-    if (rts_enabled_bool) {
-        settings_set_rts_enabled(settings, rts_enabled_bool->valueint != 0);
-    }
-
-    cJSON *web_auth_enabled_bool = cJSON_GetObjectItem(root, "web_auth_enabled");
-    if (web_auth_enabled_bool) {
-        settings_set_web_auth_enabled(settings, web_auth_enabled_bool->valueint != 0);
-    }
-
-    cJSON *ap_enabled_bool = cJSON_GetObjectItem(root, "ap_enabled");
-    if (ap_enabled_bool) {
-        settings_set_ap_enabled(settings, ap_enabled_bool->valueint != 0);
-    }
-
-    cJSON *gps_rx_pin = cJSON_GetObjectItem(root, "gps_rx_pin");
-    if (gps_rx_pin) {
-        settings_set_gps_rx_pin(settings, gps_rx_pin->valueint);
-    }
-
-    cJSON *gps_baud_rate = cJSON_GetObjectItem(root, "gps_baud_rate");
-    if (gps_baud_rate) {
-        settings_set_gps_baud_rate(settings, (uint32_t)gps_baud_rate->valueint);
-    }
-
-    // Handle display timeout
-    cJSON *display_timeout = cJSON_GetObjectItem(root, "display_timeout");
-    if (display_timeout) {
-        settings_set_display_timeout(settings, display_timeout->valueint);
-        ESP_LOGI(TAG, "Setting display timeout to: %d ms", display_timeout->valueint);
-    }
-    glog("About to Save Settings\n");
+#undef APPLY_STRING
+#undef APPLY_NUMBER
+#undef APPLY_BOOL
+#undef JSON_ITEM
 
     esp_err_t save_err = settings_save(settings);
     if (save_err != ESP_OK) {
@@ -1611,20 +1555,51 @@ static esp_err_t api_settings_get_handler(httpd_req_t *req) {
     cJSON_AddStringToObject(root, "portal_password", "");
     cJSON_AddStringToObject(root, "portal_ap_ssid", settings_get_portal_ap_ssid(settings));
     cJSON_AddStringToObject(root, "portal_domain", settings_get_portal_domain(settings));
-    cJSON_AddBoolToObject(root, "portal_offline_mode", settings_get_portal_offline_mode(settings));
+    cJSON_AddBoolToObject(root, "portal_offline", settings_get_portal_offline_mode(settings));
 
     cJSON_AddStringToObject(root, "printer_ip", settings_get_printer_ip(settings));
     cJSON_AddStringToObject(root, "printer_text", settings_get_printer_text(settings));
     cJSON_AddNumberToObject(root, "printer_font_size", settings_get_printer_font_size(settings));
     cJSON_AddNumberToObject(root, "printer_alignment", settings_get_printer_alignment(settings));
-    cJSON_AddStringToObject(root, "hex_accent_color", settings_get_accent_color_str(settings));
-    cJSON_AddStringToObject(root, "timezone_str", settings_get_timezone_str(settings));
+    cJSON_AddStringToObject(root, "flappy_name", settings_get_flappy_ghost_name(settings));
+    cJSON_AddStringToObject(root, "accent_color", settings_get_accent_color_str(settings));
+    cJSON_AddStringToObject(root, "timezone", settings_get_timezone_str(settings));
     cJSON_AddNumberToObject(root, "gps_rx_pin", settings_get_gps_rx_pin(settings));
-    cJSON_AddNumberToObject(root, "gps_baud_rate", settings_get_gps_baud_rate(settings));
-    cJSON_AddNumberToObject(root, "display_timeout", settings_get_display_timeout(settings));
-    cJSON_AddNumberToObject(root, "rts_enabled_bool", settings_get_rts_enabled(settings));
-    cJSON_AddBoolToObject(root, "web_auth_enabled", settings_get_web_auth_enabled(settings));
+    uint32_t display_timeout = settings_get_display_timeout(settings);
+    cJSON_AddNumberToObject(root, "display_timeout",
+                            display_timeout == UINT32_MAX ? 0 : display_timeout);
+    cJSON_AddBoolToObject(root, "rts_enabled", settings_get_rts_enabled(settings));
+    cJSON_AddBoolToObject(root, "web_auth", settings_get_web_auth_enabled(settings));
     cJSON_AddBoolToObject(root, "ap_enabled", settings_get_ap_enabled(settings));
+    cJSON_AddStringToObject(root, "sta_ssid", settings_get_sta_ssid(settings));
+    cJSON_AddStringToObject(root, "sta_password", "");
+
+    cJSON_AddNumberToObject(root, "max_bright", settings_get_max_screen_brightness(settings));
+    cJSON_AddBoolToObject(root, "invert_colors", settings_get_invert_colors(settings));
+    char terminal_color[8];
+    snprintf(terminal_color, sizeof(terminal_color), "#%06lX",
+             (unsigned long)(settings_get_terminal_text_color(settings) & 0xFFFFFFUL));
+    cJSON_AddStringToObject(root, "terminal_color", terminal_color);
+    cJSON_AddNumberToObject(root, "menu_theme", settings_get_menu_theme(settings));
+
+    cJSON_AddNumberToObject(root, "rgb_data_pin", settings_get_rgb_data_pin(settings));
+    int32_t red_pin, green_pin, blue_pin;
+    settings_get_rgb_separate_pins(settings, &red_pin, &green_pin, &blue_pin);
+    cJSON_AddNumberToObject(root, "rgb_red_pin", red_pin);
+    cJSON_AddNumberToObject(root, "rgb_green_pin", green_pin);
+    cJSON_AddNumberToObject(root, "rgb_blue_pin", blue_pin);
+    cJSON_AddNumberToObject(root, "neopixel_bright", settings_get_neopixel_max_brightness(settings));
+
+    cJSON_AddBoolToObject(root, "power_save", settings_get_power_save_enabled(settings));
+    cJSON_AddBoolToObject(root, "zebra_menus", settings_get_zebra_menus_enabled(settings));
+    cJSON_AddBoolToObject(root, "nav_buttons", settings_get_nav_buttons_enabled(settings));
+    cJSON_AddNumberToObject(root, "menu_layout", settings_get_menu_layout(settings));
+    cJSON_AddBoolToObject(root, "infrared_easy", settings_get_infrared_easy_mode(settings));
+    cJSON_AddBoolToObject(root, "third_ctrl", settings_get_thirds_control_enabled(settings));
+    cJSON_AddBoolToObject(root, "auto_save_scans", settings_get_auto_save_scans(settings));
+    cJSON_AddStringToObject(root, "io_btn_p10_cmd", settings_get_io_btn_p10_cmd(settings));
+    cJSON_AddStringToObject(root, "io_btn_p11_cmd", settings_get_io_btn_p11_cmd(settings));
+    cJSON_AddStringToObject(root, "io_btn_p12_cmd", settings_get_io_btn_p12_cmd(settings));
 
     // Add ESP communication pin settings
     int32_t tx_pin, rx_pin;
