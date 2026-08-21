@@ -55,6 +55,11 @@ user-selected Android folder over USB, verify their exact byte count and CRC-32,
 and then acknowledge them. GhostESP does not release a source file until that
 acknowledgement matches.
 
+The companion also publishes the selected Android volume's total and free
+bytes. `sd status` reports that Android-backed capacity as the virtual SD size
+and reports the protected flash transit queue separately as `spool_total` and
+`spool_free`.
+
 The virtual storage is formatted automatically only when its entire flash
 partition is blank. A nonblank partition that cannot be mounted is retained for
 recovery instead of being reformatted.

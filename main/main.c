@@ -43,6 +43,7 @@
 #include "driver/gpio.h"
 #include "driver/uart.h"
 #include "esp_heap_caps.h"
+#include "esp_system.h"
 #include "managers/usb_keyboard_manager.h"
 #include "managers/subghz_remote_manager.h"
 #include <stdint.h>
@@ -196,6 +197,65 @@ RGBManager_t rgb_manager;  // Global instance for entire project
 
 int ieee80211_raw_frame_sanity_check(int32_t arg, int32_t arg2, int32_t arg3) { return 0; }
 static const char *TAG = "Main.c";
+
+#if CONFIG_HELTEC_ANDROID_STORAGE
+static esp_reset_reason_t s_boot_reset_reason = ESP_RST_UNKNOWN;
+static uint32_t s_boot_power_guard_ms;
+
+static const char *boot_reset_reason_name(esp_reset_reason_t reason) {
+    switch (reason) {
+        case ESP_RST_POWERON: return "power_on";
+        case ESP_RST_SW: return "software";
+        case ESP_RST_PANIC: return "panic";
+        case ESP_RST_INT_WDT: return "interrupt_watchdog";
+        case ESP_RST_TASK_WDT: return "task_watchdog";
+        case ESP_RST_WDT: return "watchdog";
+        case ESP_RST_DEEPSLEEP: return "deep_sleep";
+        case ESP_RST_BROWNOUT: return "brownout";
+        case ESP_RST_SDIO: return "sdio";
+        case ESP_RST_USB: return "usb";
+        case ESP_RST_JTAG: return "jtag";
+        case ESP_RST_EFUSE: return "efuse";
+        case ESP_RST_PWR_GLITCH: return "power_glitch";
+        case ESP_RST_CPU_LOCKUP: return "cpu_lockup";
+        case ESP_RST_UNKNOWN:
+        default: return "unknown";
+    }
+}
+
+static void boot_power_guard(void) {
+    s_boot_reset_reason = esp_reset_reason();
+    switch (s_boot_reset_reason) {
+        case ESP_RST_BROWNOUT:
+        case ESP_RST_PWR_GLITCH:
+            s_boot_power_guard_ms = 2500;
+            break;
+        case ESP_RST_POWERON:
+            s_boot_power_guard_ms = 1200;
+            break;
+        default:
+            s_boot_power_guard_ms = 0;
+            break;
+    }
+
+    if (s_boot_power_guard_ms == 0) return;
+
+    // Keep the external rail and optional GPS off while a freshly recharged
+    // battery recovers. Enabling the display, GPS and radios together can
+    // otherwise pull the rail back below the brownout threshold.
+#if CONFIG_WITH_STATUS_DISPLAY && CONFIG_STATUS_DISPLAY_POWER_PIN >= 0
+    gpio_reset_pin(CONFIG_STATUS_DISPLAY_POWER_PIN);
+    gpio_set_direction(CONFIG_STATUS_DISPLAY_POWER_PIN, GPIO_MODE_OUTPUT);
+    gpio_set_level(CONFIG_STATUS_DISPLAY_POWER_PIN, 1);
+#endif
+#if CONFIG_HAS_GPS && CONFIG_GPS_POWER_PIN >= 0
+    gpio_reset_pin(CONFIG_GPS_POWER_PIN);
+    gpio_set_direction(CONFIG_GPS_POWER_PIN, GPIO_MODE_OUTPUT);
+    gpio_set_level(CONFIG_GPS_POWER_PIN, !CONFIG_GPS_POWER_ACTIVE_LEVEL);
+#endif
+    vTaskDelay(pdMS_TO_TICKS(s_boot_power_guard_ms));
+}
+#endif
 
 /* timegm() is not available in ESP-IDF's newlib for ESP32-C5 (RISC-V).
  * Provide a minimal implementation that both main.c (RTC sync) and
@@ -653,6 +713,9 @@ static void deferred_sd_init_task(void *arg) {
 }
 
 void app_main(void) {
+#if CONFIG_HELTEC_ANDROID_STORAGE
+    boot_power_guard();
+#endif
     memory_debug_start_boot_trace();
     MEASURE_INIT_RAM("Ghostchi Mood init", ghostchi_mood_init());
     ghostchi_mood_record_event(GHOSTCHI_MOOD_EVENT_BOOT, 3);
@@ -689,6 +752,12 @@ void app_main(void) {
 
 
     MEASURE_INIT_RAM("Serial Manager", serial_manager_init());
+#if CONFIG_HELTEC_ANDROID_STORAGE
+    printf("[BOOT] reset=%s (%d), power guard=%lu ms\n",
+           boot_reset_reason_name(s_boot_reset_reason),
+           (int)s_boot_reset_reason,
+           (unsigned long)s_boot_power_guard_ms);
+#endif
     MEASURE_INIT_RAM("Wifi Manager", wifi_manager_init());
 #ifdef CONFIG_WITH_ETHERNET
     {
