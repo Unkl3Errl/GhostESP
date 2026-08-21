@@ -1065,14 +1065,11 @@ static bool bridge_create_task(void) {
 
 #if CONFIG_HELTEC_ANDROID_STORAGE
     if (!s_bridge.local_task_handle && !s_bridge.local_task_stack) {
-#if CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY
+        /* Local bridge commands can enter FAT/VFS and NVS code that disables
+         * the external-memory cache. Keep this worker's stack internal so a
+         * storage command cannot fault while its PSRAM stack is inaccessible. */
         s_bridge.local_task_stack = (StackType_t *)heap_caps_malloc(BRIDGE_LOCAL_TASK_STACK_BYTES,
-                                                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-#endif
-        if (!s_bridge.local_task_stack) {
-            s_bridge.local_task_stack = (StackType_t *)heap_caps_malloc(BRIDGE_LOCAL_TASK_STACK_BYTES,
-                                                                        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-        }
+                                                                    MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     }
     if (!s_bridge.local_task_handle && !s_bridge.local_task_tcb) {
         s_bridge.local_task_tcb = (StaticTask_t *)heap_caps_calloc(1, sizeof(StaticTask_t),
