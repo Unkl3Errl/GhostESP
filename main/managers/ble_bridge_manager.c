@@ -39,8 +39,12 @@
 #define BRIDGE_NVS_PEER "peer"
 #define BRIDGE_NVS_ENABLED "enabled"
 #define BRIDGE_TASK_STACK_BYTES 8192
+#define BRIDGE_TASK_STACK_WORDS (BRIDGE_TASK_STACK_BYTES / sizeof(StackType_t))
 #define BRIDGE_FRAME_HEADER_LEN 12
+#define BRIDGE_ATT_NOTIFY_OVERHEAD 3
 #define BRIDGE_DEFAULT_MTU 128
+#define BRIDGE_NOTIFY_RETRY_COUNT 40
+#define BRIDGE_NOTIFY_RETRY_MS 10
 #define BRIDGE_PEER_COMMAND_PAYLOAD_MAX 60
 #define BRIDGE_COMMAND_MAX 250
 
@@ -193,10 +197,10 @@ static void bridge_write_u32_le(uint8_t *p, uint32_t value) {
 
 static size_t bridge_notify_payload_cap(void) {
     uint16_t mtu = s_bridge.mtu ? s_bridge.mtu : BRIDGE_DEFAULT_MTU;
-    if (mtu <= BRIDGE_FRAME_HEADER_LEN) {
+    if (mtu <= BRIDGE_FRAME_HEADER_LEN + BRIDGE_ATT_NOTIFY_OVERHEAD) {
         return 20;
     }
-    size_t cap = (size_t)mtu - BRIDGE_FRAME_HEADER_LEN;
+    size_t cap = (size_t)mtu - BRIDGE_ATT_NOTIFY_OVERHEAD - BRIDGE_FRAME_HEADER_LEN;
     if (cap > 244) {
         cap = 244;
     }
@@ -240,18 +244,27 @@ static bool bridge_send_frame(uint8_t type, uint8_t status, uint32_t cmd_id,
         memcpy(frame + BRIDGE_FRAME_HEADER_LEN, payload, payload_len);
     }
 
-    struct os_mbuf *om = ble_hs_mbuf_from_flat(frame, frame_len);
+    int rc = BLE_HS_ENOMEM;
+    for (int attempt = 0; attempt < BRIDGE_NOTIFY_RETRY_COUNT; ++attempt) {
+        struct os_mbuf *om = ble_hs_mbuf_from_flat(frame, frame_len);
+        if (om) {
+            rc = ble_gatts_notify_custom(conn_handle, tx_handle, om);
+            if (rc == 0) {
+                free(frame);
+                if (type == GB_TYPE_DATA || type == GB_TYPE_HAS_DATA) {
+                    vTaskDelay(pdMS_TO_TICKS(BRIDGE_NOTIFY_RETRY_MS));
+                }
+                return true;
+            }
+        }
+        if (rc != BLE_HS_ENOMEM && rc != BLE_HS_EAGAIN && rc != BLE_HS_EBUSY) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(BRIDGE_NOTIFY_RETRY_MS));
+    }
     free(frame);
-    if (!om) {
-        return false;
-    }
-
-    int rc = ble_gatts_notify_custom(conn_handle, tx_handle, om);
-    if (rc != 0) {
-        ESP_LOGW(TAG, "notify failed: %d", rc);
-        return false;
-    }
-    return true;
+    ESP_LOGW(TAG, "notify failed after retries: %d", rc);
+    return false;
 }
 
 static bool bridge_send_data_chunked(uint32_t cmd_id, const uint8_t *data, size_t len) {
@@ -890,7 +903,7 @@ static bool bridge_create_task(void) {
         return false;
     }
 
-    s_bridge.task_handle = xTaskCreateStatic(bridge_task, "ble_bridge", BRIDGE_TASK_STACK_BYTES, NULL, 4,
+    s_bridge.task_handle = xTaskCreateStatic(bridge_task, "ble_bridge", BRIDGE_TASK_STACK_WORDS, NULL, 4,
                                              s_bridge.task_stack, s_bridge.task_tcb);
     return s_bridge.task_handle != NULL;
 }
@@ -915,7 +928,7 @@ static void bridge_kick_wait_and_send(void) {
         return;
     }
     (void)xTaskCreate(bridge_wait_and_send_task, "ble_bridge_wait",
-                      BRIDGE_TASK_STACK_BYTES, NULL, 3, NULL);
+                      BRIDGE_TASK_STACK_WORDS, NULL, 3, NULL);
 }
 
 bool ble_bridge_start(void) {

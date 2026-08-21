@@ -1,5 +1,13 @@
 # Ghost ESP Changelog
 
+## Revival v2.1.0-mobile.9
+
+- Corrected the direct Android BLE bridge's static task-stack sizing so the
+  declared FreeRTOS depth matches the allocated memory.
+- Added paced, retrying GATT notifications and corrected the ATT payload limit
+  so large directory listings and virtual-SD reads complete without dropping
+  response or END frames.
+
 ## Revival v2.1.0-mobile.8
 
 - Based on the upstream v2.1 stable release.
