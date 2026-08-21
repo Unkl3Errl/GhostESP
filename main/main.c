@@ -931,6 +931,19 @@ void app_main(void) {
             ESP_LOGI(TAG, "Comm Manager disabled for this build");
         }
     }
+#if CONFIG_HELTEC_ANDROID_STORAGE
+    /* The FAT/WL-backed spool needs a short-lived allocation during its first
+     * mount.  NimBLE permanently consumes enough internal RAM that mounting
+     * it afterward can fail with ESP_ERR_NO_MEM.  Establish the spool before
+     * restoring the always-on Android bridge; deferred_sd_init_task will see
+     * the existing mount and continue its normal asset/startup work. */
+    esp_err_t mobile_storage_ret = ESP_OK;
+    MEASURE_INIT_RAM("Mobile virtual SD init", mobile_storage_ret = sd_card_init());
+    if (mobile_storage_ret != ESP_OK) {
+        ESP_LOGW(TAG, "Mobile virtual SD pre-mount failed: %s",
+                 esp_err_to_name(mobile_storage_ret));
+    }
+#endif
 #ifndef CONFIG_IDF_TARGET_ESP32S2
     MEASURE_INIT_RAM("BLE Bridge restore", ble_bridge_apply_saved_enabled());
 #endif

@@ -38,7 +38,7 @@
 #define BRIDGE_NVS_NS "blebridge"
 #define BRIDGE_NVS_PEER "peer"
 #define BRIDGE_NVS_ENABLED "enabled"
-#define BRIDGE_TASK_STACK_BYTES 4096
+#define BRIDGE_TASK_STACK_BYTES 8192
 #define BRIDGE_FRAME_HEADER_LEN 12
 #define BRIDGE_DEFAULT_MTU 128
 #define BRIDGE_PEER_COMMAND_PAYLOAD_MAX 60
@@ -65,6 +65,11 @@ typedef enum {
 } bridge_frame_type_t;
 
 typedef struct {
+    uint32_t cmd_id;
+    char command[BRIDGE_COMMAND_MAX + 1];
+} bridge_local_command_t;
+
+typedef struct {
     bool running;
     bool gatt_registered;
     bool ble_connected;
@@ -75,6 +80,7 @@ typedef struct {
     TaskHandle_t task_handle;
     StackType_t *task_stack;
     StaticTask_t *task_tcb;
+    QueueHandle_t local_command_queue;
     SemaphoreHandle_t lock;
     uint32_t active_cmd_id;
     bool active_command;
@@ -94,6 +100,7 @@ static ble_bridge_state_t s_bridge = {
 
 static bool bridge_load_enabled(void);
 static void bridge_save_enabled(bool enabled);
+static void bridge_local_capture(const char *line, void *user_data);
 
 #ifndef CONFIG_IDF_TARGET_ESP32S2
 static int bridge_gatt_access_cb(uint16_t conn_handle, uint16_t attr_handle,
@@ -383,6 +390,9 @@ static void bridge_stop_locked(void) {
     bridge_lock();
     s_bridge.active_command = false;
     s_bridge.active_cmd_id = 0;
+    if (s_bridge.local_command_queue) {
+        xQueueReset(s_bridge.local_command_queue);
+    }
     bridge_unlock();
 #ifndef CONFIG_IDF_TARGET_ESP32S2
     if (s_bridge.ble_connected && s_bridge.conn_handle != BLE_HS_CONN_HANDLE_NONE) {
@@ -471,6 +481,20 @@ static void bridge_response_callback(const uint8_t *data, size_t length, void *u
     bridge_data_callback(data, length, user_data);
 }
 
+static void bridge_local_capture(const char *line, void *user_data) {
+    (void)user_data;
+    if (!line || line[0] == '\0') {
+        return;
+    }
+    bridge_lock();
+    bool active = s_bridge.running && s_bridge.active_command;
+    uint32_t cmd_id = s_bridge.active_cmd_id;
+    bridge_unlock();
+    if (active) {
+        (void)bridge_send_data_chunked(cmd_id, (const uint8_t *)line, strlen(line));
+    }
+}
+
 static void bridge_send_cmd_to_peer(uint32_t cmd_id, const char *command) {
     if (!command || command[0] == '\0') {
         bridge_send_terminal_err(cmd_id, "empty command");
@@ -480,7 +504,28 @@ static void bridge_send_cmd_to_peer(uint32_t cmd_id, const char *command) {
     bridge_send_ack(cmd_id);
 
     if (!esp_comm_manager_is_connected()) {
-        bridge_send_terminal_err(cmd_id, "comm link down");
+        bridge_local_command_t request = {.cmd_id = cmd_id};
+        strncpy(request.command, command, sizeof(request.command) - 1);
+        request.command[sizeof(request.command) - 1] = '\0';
+        bridge_lock();
+        bool busy = s_bridge.active_command;
+        if (!busy) {
+            s_bridge.active_command = true;
+            s_bridge.active_cmd_id = cmd_id;
+        }
+        bridge_unlock();
+        if (busy) {
+            bridge_send_terminal_err(cmd_id, "bridge busy");
+            return;
+        }
+        if (!s_bridge.local_command_queue ||
+            xQueueSend(s_bridge.local_command_queue, &request, 0) != pdTRUE) {
+            bridge_lock();
+            s_bridge.active_command = false;
+            s_bridge.active_cmd_id = 0;
+            bridge_unlock();
+            bridge_send_terminal_err(cmd_id, "local command queue full");
+        }
         return;
     }
 
@@ -528,7 +573,23 @@ static void bridge_send_cmd_to_peer(uint32_t cmd_id, const char *command) {
 static void bridge_task(void *arg) {
     (void)arg;
     while (s_bridge.running) {
-        vTaskDelay(pdMS_TO_TICKS(100));
+        bridge_local_command_t request;
+        if (s_bridge.local_command_queue &&
+            xQueueReceive(s_bridge.local_command_queue, &request, pdMS_TO_TICKS(100)) == pdTRUE) {
+            glog_set_mirror_capture(bridge_local_capture, NULL);
+            int result = handle_serial_command(request.command);
+            glog_set_mirror_capture(NULL, NULL);
+
+            bridge_lock();
+            bool send_end = s_bridge.running && s_bridge.active_command &&
+                            s_bridge.active_cmd_id == request.cmd_id;
+            s_bridge.active_command = false;
+            s_bridge.active_cmd_id = 0;
+            bridge_unlock();
+            if (send_end) {
+                bridge_send_end(request.cmd_id, result == ESP_OK ? 0 : 1);
+            }
+        }
     }
     bridge_stop_locked();
     s_bridge.task_handle = NULL;
@@ -803,7 +864,10 @@ static bool bridge_ensure_runtime(void) {
     if (!s_bridge.lock) {
         s_bridge.lock = xSemaphoreCreateMutex();
     }
-    return s_bridge.lock != NULL;
+    if (!s_bridge.local_command_queue) {
+        s_bridge.local_command_queue = xQueueCreate(2, sizeof(bridge_local_command_t));
+    }
+    return s_bridge.lock != NULL && s_bridge.local_command_queue != NULL;
 }
 
 static bool bridge_create_task(void) {
@@ -933,9 +997,14 @@ bool ble_bridge_set_enabled(bool enabled) {
             ESP_LOGI(TAG, "set_enabled: sent start to peer: %s", ok ? "ok" : "fail");
             return ok;
         }
+#if CONFIG_HELTEC_ANDROID_STORAGE
+        ESP_LOGI(TAG, "set_enabled: no GhostLink peer; starting local command bridge");
+        return ble_bridge_start();
+#else
         ESP_LOGI(TAG, "set_enabled: peer not connected, spawning wait task");
         bridge_kick_wait_and_send();
         return true;
+#endif
     }
 
     if (esp_comm_manager_is_connected()) {
@@ -947,6 +1016,13 @@ bool ble_bridge_set_enabled(bool enabled) {
 void ble_bridge_apply_saved_enabled(void) {
     (void)nvs_flash_init();
     bool enabled = bridge_load_enabled();
+#if CONFIG_HELTEC_ANDROID_STORAGE
+    if (!enabled) {
+        enabled = true;
+        bridge_save_enabled(true);
+        ESP_LOGI(TAG, "enabled direct Android BLE bridge for mobile build");
+    }
+#endif
     ESP_LOGI(TAG, "apply_saved_enabled: stored=%s", enabled ? "true" : "false");
     if (!enabled) {
         return;
@@ -956,8 +1032,13 @@ void ble_bridge_apply_saved_enabled(void) {
         ESP_LOGI(TAG, "apply_saved_enabled: sent start to peer: %s", ok ? "ok" : "fail");
         return;
     }
+#if CONFIG_HELTEC_ANDROID_STORAGE
+    ESP_LOGI(TAG, "apply_saved_enabled: no GhostLink peer; starting local command bridge");
+    (void)ble_bridge_start();
+#else
     ESP_LOGI(TAG, "apply_saved_enabled: peer not connected, spawning wait task");
     bridge_kick_wait_and_send();
+#endif
 }
 
 void ble_bridge_stop(void) {

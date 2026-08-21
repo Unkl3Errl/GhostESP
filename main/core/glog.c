@@ -21,6 +21,8 @@ static char *s_glog_q[GLOG_DEFER_MAX];
 static uint8_t s_q_head = 0, s_q_tail = 0, s_q_count = 0;
 static glog_capture_fn_t s_glog_capture_fn;
 static void *s_glog_capture_user;
+static glog_capture_fn_t s_glog_mirror_capture_fn;
+static void *s_glog_mirror_capture_user;
 
 static inline void glog_lock(void) {
     if (!s_glog_mutex) {
@@ -112,12 +114,23 @@ void glog(const char *fmt, ...) {
     glog_capture_fn_t cb = s_glog_capture_fn;
     void *cu = s_glog_capture_user;
     if (cb) cb(buf, cu);
+
+    glog_capture_fn_t mirror_cb = s_glog_mirror_capture_fn;
+    void *mirror_user = s_glog_mirror_capture_user;
+    if (mirror_cb) mirror_cb(buf, mirror_user);
 }
 
 void glog_set_capture(glog_capture_fn_t fn, void *user) {
     glog_lock();
     s_glog_capture_fn = fn;
     s_glog_capture_user = user;
+    glog_unlock();
+}
+
+void glog_set_mirror_capture(glog_capture_fn_t fn, void *user) {
+    glog_lock();
+    s_glog_mirror_capture_fn = fn;
+    s_glog_mirror_capture_user = user;
     glog_unlock();
 }
 
@@ -143,4 +156,3 @@ void glog_flush_deferred(void) {
         free(out);
     }
 }
-

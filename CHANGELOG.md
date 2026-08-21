@@ -1,12 +1,17 @@
 # Ghost ESP Changelog
 
-## Revival v2.1.0-mobile.5
+## Revival v2.1.0-mobile.8
 
 - Based on the upstream v2.1 stable release.
 - Added the WiFi LoRa 32 V4 board target with onboard GNSS power control.
 - Added a 12 MB internal-flash virtual SD spool for boards without an SD slot.
 - Added verified Android archival: closed files are released only after matching
   byte-count and CRC-32 acknowledgement.
+- Added an automatically restored, phone-facing BLE GATT service on the mobile
+  board target. It executes commands locally when no GhostLink peer is attached
+  and preserves the upstream GhostLink relay behavior when a peer is connected.
+- Mounted the flash spool before NimBLE starts and increased the local-command
+  task stack so Android storage commands remain stable with Wi-Fi active.
 - Fixed virtual-storage initialization and Web UI settings persistence.
 
 ## Revival v2.1.0
