@@ -43,6 +43,7 @@
 #include "driver/gpio.h"
 #include "driver/uart.h"
 #include "esp_heap_caps.h"
+#include "esp_system.h"
 #include "managers/usb_keyboard_manager.h"
 #include "managers/subghz_remote_manager.h"
 #include <stdint.h>
@@ -196,6 +197,65 @@ RGBManager_t rgb_manager;  // Global instance for entire project
 
 int ieee80211_raw_frame_sanity_check(int32_t arg, int32_t arg2, int32_t arg3) { return 0; }
 static const char *TAG = "Main.c";
+
+#if CONFIG_HELTEC_ANDROID_STORAGE
+static esp_reset_reason_t s_boot_reset_reason = ESP_RST_UNKNOWN;
+static uint32_t s_boot_power_guard_ms;
+
+static const char *boot_reset_reason_name(esp_reset_reason_t reason) {
+    switch (reason) {
+        case ESP_RST_POWERON: return "power_on";
+        case ESP_RST_SW: return "software";
+        case ESP_RST_PANIC: return "panic";
+        case ESP_RST_INT_WDT: return "interrupt_watchdog";
+        case ESP_RST_TASK_WDT: return "task_watchdog";
+        case ESP_RST_WDT: return "watchdog";
+        case ESP_RST_DEEPSLEEP: return "deep_sleep";
+        case ESP_RST_BROWNOUT: return "brownout";
+        case ESP_RST_SDIO: return "sdio";
+        case ESP_RST_USB: return "usb";
+        case ESP_RST_JTAG: return "jtag";
+        case ESP_RST_EFUSE: return "efuse";
+        case ESP_RST_PWR_GLITCH: return "power_glitch";
+        case ESP_RST_CPU_LOCKUP: return "cpu_lockup";
+        case ESP_RST_UNKNOWN:
+        default: return "unknown";
+    }
+}
+
+static void boot_power_guard(void) {
+    s_boot_reset_reason = esp_reset_reason();
+    switch (s_boot_reset_reason) {
+        case ESP_RST_BROWNOUT:
+        case ESP_RST_PWR_GLITCH:
+            s_boot_power_guard_ms = 2500;
+            break;
+        case ESP_RST_POWERON:
+            s_boot_power_guard_ms = 1200;
+            break;
+        default:
+            s_boot_power_guard_ms = 0;
+            break;
+    }
+
+    if (s_boot_power_guard_ms == 0) return;
+
+    // Keep the external rail and optional GPS off while a freshly recharged
+    // battery recovers. Enabling the display, GPS and radios together can
+    // otherwise pull the rail back below the brownout threshold.
+#if CONFIG_WITH_STATUS_DISPLAY && CONFIG_STATUS_DISPLAY_POWER_PIN >= 0
+    gpio_reset_pin(CONFIG_STATUS_DISPLAY_POWER_PIN);
+    gpio_set_direction(CONFIG_STATUS_DISPLAY_POWER_PIN, GPIO_MODE_OUTPUT);
+    gpio_set_level(CONFIG_STATUS_DISPLAY_POWER_PIN, 1);
+#endif
+#if CONFIG_HAS_GPS && CONFIG_GPS_POWER_PIN >= 0
+    gpio_reset_pin(CONFIG_GPS_POWER_PIN);
+    gpio_set_direction(CONFIG_GPS_POWER_PIN, GPIO_MODE_OUTPUT);
+    gpio_set_level(CONFIG_GPS_POWER_PIN, !CONFIG_GPS_POWER_ACTIVE_LEVEL);
+#endif
+    vTaskDelay(pdMS_TO_TICKS(s_boot_power_guard_ms));
+}
+#endif
 
 /* timegm() is not available in ESP-IDF's newlib for ESP32-C5 (RISC-V).
  * Provide a minimal implementation that both main.c (RTC sync) and
@@ -653,6 +713,10 @@ static void deferred_sd_init_task(void *arg) {
 }
 
 void app_main(void) {
+#if CONFIG_HELTEC_ANDROID_STORAGE
+    boot_power_guard();
+#endif
+    memory_debug_init();
     memory_debug_start_boot_trace();
     MEASURE_INIT_RAM("Ghostchi Mood init", ghostchi_mood_init());
     ghostchi_mood_record_event(GHOSTCHI_MOOD_EVENT_BOOT, 3);
@@ -689,6 +753,12 @@ void app_main(void) {
 
 
     MEASURE_INIT_RAM("Serial Manager", serial_manager_init());
+#if CONFIG_HELTEC_ANDROID_STORAGE
+    printf("[BOOT] reset=%s (%d), power guard=%lu ms\n",
+           boot_reset_reason_name(s_boot_reset_reason),
+           (int)s_boot_reset_reason,
+           (unsigned long)s_boot_power_guard_ms);
+#endif
     MEASURE_INIT_RAM("Wifi Manager", wifi_manager_init());
 #ifdef CONFIG_WITH_ETHERNET
     {
@@ -862,6 +932,19 @@ void app_main(void) {
             ESP_LOGI(TAG, "Comm Manager disabled for this build");
         }
     }
+#if CONFIG_HELTEC_ANDROID_STORAGE
+    /* The FAT/WL-backed spool needs a short-lived allocation during its first
+     * mount.  NimBLE permanently consumes enough internal RAM that mounting
+     * it afterward can fail with ESP_ERR_NO_MEM.  Establish the spool before
+     * restoring the always-on Android bridge; deferred_sd_init_task will see
+     * the existing mount and continue its normal asset/startup work. */
+    esp_err_t mobile_storage_ret = ESP_OK;
+    MEASURE_INIT_RAM("Mobile virtual SD init", mobile_storage_ret = sd_card_init());
+    if (mobile_storage_ret != ESP_OK) {
+        ESP_LOGW(TAG, "Mobile virtual SD pre-mount failed: %s",
+                 esp_err_to_name(mobile_storage_ret));
+    }
+#endif
 #ifndef CONFIG_IDF_TARGET_ESP32S2
     MEASURE_INIT_RAM("BLE Bridge restore", ble_bridge_apply_saved_enabled());
 #endif
@@ -934,6 +1017,19 @@ void app_main(void) {
     joystick_init(&joysticks[2], CONFIG_U_BTN, HOLD_LIMIT, true);  // Up
     joystick_init(&joysticks[3], CONFIG_R_BTN, HOLD_LIMIT, true);  // Right
     joystick_init(&joysticks[4], CONFIG_D_BTN, HOLD_LIMIT, true);  // Down
+#ifdef CONFIG_JOYSTICK_COM_PIN
+    if (CONFIG_JOYSTICK_COM_PIN >= 0) {
+        gpio_config_t com_conf = {
+            .pin_bit_mask = (1ULL << CONFIG_JOYSTICK_COM_PIN),
+            .mode = GPIO_MODE_OUTPUT,
+            .pull_up_en = GPIO_PULLUP_DISABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type = GPIO_INTR_DISABLE};
+        gpio_config(&com_conf);
+        gpio_set_level(CONFIG_JOYSTICK_COM_PIN, 0);
+        printf("Joystick COM pin %d driven LOW\n", CONFIG_JOYSTICK_COM_PIN);
+    }
+#endif
 #endif
     printf("Joystick Setup Successfully...\n");
 #endif
@@ -1000,11 +1096,17 @@ void app_main(void) {
 
 #if GHOSTESP_OTA_SUPPORTED
     {
-        BaseType_t ota_task_rc = xTaskCreate(ota_background_check_task, "OTA Check", 6144, NULL,
-                                              tskIDLE_PRIORITY + 1, NULL);
-        if (ota_task_rc != pdPASS) {
-            ESP_LOGE(TAG, "Failed to create OTA background check task");
+#ifdef CONFIG_BUILD_CONFIG_TEMPLATE
+        // Networked boards are checked by wifi_manager after GOT_IP. Keep this
+        // worker only for the Wi-Fi-less Banshee S3 GhostLink peer.
+        if (strcmp(CONFIG_BUILD_CONFIG_TEMPLATE, "somethingsomething2") == 0) {
+            BaseType_t ota_task_rc = xTaskCreate(ota_background_check_task, "OTA Check", 6144,
+                                                 NULL, tskIDLE_PRIORITY + 1, NULL);
+            if (ota_task_rc != pdPASS) {
+                ESP_LOGE(TAG, "Failed to create OTA background check task");
+            }
         }
+#endif
     }
 #endif
 
@@ -1141,6 +1243,11 @@ void app_main(void) {
 #endif
 
     ESP_LOGI(TAG, "Ghost ESP INIT complete.");
+    memory_debug_log_snapshot("app_main complete");
+    esp_err_t mem_monitor_err = memory_debug_start_periodic_monitor();
+    if (mem_monitor_err != ESP_OK) {
+        ESP_LOGW(TAG, "Periodic RAM monitor failed to start: %s", esp_err_to_name(mem_monitor_err));
+    }
     print_boot_banner();
     printf("\n");
     printf("Type 'help' for available commands\n");

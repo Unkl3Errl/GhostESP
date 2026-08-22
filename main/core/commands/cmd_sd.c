@@ -88,6 +88,11 @@ void handle_sd_save_config(int argc, char **argv) {
 static char *g_sd_cli_paths[SD_CLI_MAX_ENTRIES];
 static uint8_t g_sd_cli_types[SD_CLI_MAX_ENTRIES];
 static size_t g_sd_cli_count = 0;
+#if CONFIG_HELTEC_ANDROID_STORAGE
+static uint64_t g_android_host_total_bytes = 0;
+static uint64_t g_android_host_free_bytes = 0;
+static bool g_android_host_capacity_valid = false;
+#endif
 
 static void sd_cli_clear_index(void) {
     for (size_t i = 0; i < g_sd_cli_count; ++i) {
@@ -260,6 +265,25 @@ void handle_sd_cmd(int argc, char **argv) {
     const char *sub = argv[1];
     char path[256];
 
+#if CONFIG_HELTEC_ANDROID_STORAGE
+    if (strcmp(sub, "host") == 0 && argc == 4) {
+        uint64_t total = 0;
+        uint64_t free_bytes = 0;
+        if (!sd_cli_parse_u64(argv[2], &total) || !sd_cli_parse_u64(argv[3], &free_bytes) ||
+            total == 0 || free_bytes > total) {
+            glog("SD:ERR:invalid_host_capacity\n");
+        } else {
+            g_android_host_total_bytes = total;
+            g_android_host_free_bytes = free_bytes;
+            g_android_host_capacity_valid = true;
+            glog("SD:HOST:total=%llu\n", (unsigned long long)total);
+            glog("SD:HOST:free=%llu\n", (unsigned long long)free_bytes);
+            glog("SD:OK:host-capacity\n");
+        }
+        return;
+    }
+#endif
+
     if (strcmp(sub, "status") == 0) {
         if (!sd_cli_ensure_mounted()) {
             glog("SD:STATUS:mounted=false\n");
@@ -278,6 +302,19 @@ void handle_sd_cmd(int argc, char **argv) {
         }
         uint64_t total = 0, free_bytes = 0;
         if (esp_vfs_fat_info("/mnt", &total, &free_bytes) == ESP_OK && total > 0) {
+#if CONFIG_HELTEC_ANDROID_STORAGE
+            const uint64_t spool_total = total;
+            const uint64_t spool_free = free_bytes;
+            if (sd_card_is_virtual_storage()) {
+                glog("SD:STATUS:backing=%s\n", g_android_host_capacity_valid ? "android" : "spool");
+                if (g_android_host_capacity_valid) {
+                    total = g_android_host_total_bytes;
+                    free_bytes = g_android_host_free_bytes;
+                }
+                glog("SD:STATUS:spool_total=%llu\n", (unsigned long long)spool_total);
+                glog("SD:STATUS:spool_free=%llu\n", (unsigned long long)spool_free);
+            }
+#endif
             glog("SD:STATUS:total=%llu\n", (unsigned long long)total);
             glog("SD:STATUS:free=%llu\n", (unsigned long long)free_bytes);
             glog("SD:STATUS:total_mb=%llu\n", (unsigned long long)(total / (1024 * 1024)));
@@ -511,7 +548,17 @@ void handle_sd_cmd(int argc, char **argv) {
                     break;
                 }
                 b64[written] = '\0';
-                glog("SD:READ:DATA:%s\n", b64);
+                /* glog truncates output at 511 bytes, so a 1024-char base64 line
+                 * would be cut mid-character. Emit 4-aligned pieces that each fit
+                 * the glog buffer; the host parser decodes and concatenates them. */
+                const size_t b64_line_max = 480; /* multiple of 4, 13 + 480 + 1 < 512 */
+                size_t pos = 0;
+                while (pos < written) {
+                    size_t piece = written - pos;
+                    if (piece > b64_line_max) piece = b64_line_max;
+                    glog("SD:READ:DATA:%.*s\n", (int)piece, b64 + pos);
+                    pos += piece;
+                }
             } else {
                 size_t out_written = fwrite(buf, 1, to_write, stdout);
                 if (out_written != to_write) {

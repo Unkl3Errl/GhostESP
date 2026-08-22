@@ -6,14 +6,18 @@ weight: 110
 
 The **BLE Bridge** turns one of your GhostESP devices into a wireless proxy that exposes a Bluetooth Low Energy (BLE) GATT service to the Android companion app. Commands you send from the phone are forwarded over the existing GhostLink UART link to a second, "main" ESP32, and the response is shipped back over BLE notifications.
 
+On the mobile virtual-storage target, the same GATT service starts at boot and executes commands on the advertising board when no GhostLink peer is connected. If a peer is connected, the original two-board relay behavior remains in effect.
+
 This lets you control a GhostESP board that doesn't have a direct BLE link to your phone by using a second, BLE-capable board as a relay.
 
 ## Prerequisites
 
-- Two GhostESP-flashed ESP32 boards wired together as a [GhostLink]({{< relref "dual-communication.md" >}}) pair.
+- Two GhostESP-flashed ESP32 boards wired together as a [GhostLink]({{< relref "dual-communication.md" >}}) pair, unless the mobile virtual-storage target is being used in direct mode.
 - The **Android companion app** installed on your phone.
 - Both boards powered and able to complete the GhostLink handshake.
 - The bridge board must be BLE-capable. **ESP32-S2 is not supported** (it has no Bluetooth).
+
+Direct mode needs only the mobile virtual-storage board and the Android app; no UART peer wiring or `blebridge pair` command is required.
 
 ## How it works
 
@@ -29,7 +33,7 @@ Phone (Android app)        Bridge ESP32            Main ESP32
   - **RX** (write): framed commands from the phone.
   - **TX** (notify): framed responses sent back to the phone.
   - **CTRL** (write): a raw-text escape hatch. Writing `stop` shuts the bridge down.
-- The **main board** runs the command on its own CLI. From its perspective, the bridge is just another GhostLink peer.
+- The **main board** runs the command on its own CLI. From its perspective, the bridge is just another GhostLink peer. In direct mode, the advertising board runs the command locally and streams the same framed response to Android.
 - All communication is framed (magic bytes `0x47 0x42`, version `0x01`, 12-byte header) and command responses are correlated by a per-command ID.
 - The bridge's on/off state and the last paired peer name are persisted to NVS and restored on every boot.
 
@@ -103,7 +107,7 @@ From the app, every screen works the same as if you were wired in over USB — W
 
 ## Auto-restore on reboot
 
-If you enabled the bridge with `blebridge start` (or the menu toggle), the state is persisted to NVS (`blebridge/enabled`). On every boot the firmware reapplies it. If the main board isn't yet connected over GhostLink when the bridge starts, the firmware schedules a one-shot task that keeps retrying for about 30 seconds and fires `blebridge start` on the peer as soon as the UART link comes up.
+If you enabled the bridge with `blebridge start` (or the menu toggle), the state is persisted to NVS (`blebridge/enabled`). On every boot the firmware reapplies it. Standard builds wait for the configured GhostLink peer. The mobile virtual-storage target instead starts its direct GATT service immediately and restores it on every boot.
 
 ## On-screen UI
 
@@ -113,8 +117,8 @@ If you enabled the bridge with `blebridge start` (or the menu toggle), the state
 ## Limitations
 
 - **ESP32-S2 is not supported** — it has no Bluetooth radio. The CLI registration, the menu item, and the bridge code itself are all gated to exclude S2.
-- **Wi-Fi is suspended** while the bridge is running. The GhostNet AP and any STA connection are torn down when `blebridge start` runs and restored when the bridge stops. This is an inherent ESP32 BLE/Wi-Fi coexistence cost.
-- **One command in flight at a time.** The bridge serializes each command/response round-trip; sending a new command waits for the previous one to go idle (200 ms of no DATA/END frames, or a 120 s safety cap).
+- **Wi-Fi coexistence depends on the target.** The mobile virtual-storage target keeps GhostNet active with the direct BLE bridge. Other relay builds may suspend Wi-Fi while the bridge is running.
+- **One command in flight at a time.** The bridge serializes each command/response round-trip. The Android client waits for the END frame before sending the next command.
 - **The phone app does not write to the CTRL characteristic.** Stopping is done either by sending `blebridge stop` as a framed command or by simply disconnecting the GATT link, which the firmware treats as "stop the bridge".
 - **The app cannot set the peer name.** You must run `blebridge pair <name>` on the bridge board itself; there's no UI in the app for that.
 
@@ -146,7 +150,7 @@ If you enabled the bridge with `blebridge start` (or the menu toggle), the state
 
 ## Notes
 
-- The bridge runs on top of the existing GhostLink transport. It is **not** a replacement for GhostLink — both must be working.
+- Relay mode runs on top of the existing GhostLink transport. Direct mode on the mobile virtual-storage target does not require GhostLink.
 - The advertised name is fixed at `GhostESP Bridge` and is not user-configurable.
 - Auto-discovery on the GhostLink side happens every 3 seconds; the bridge will reconnect to the saved peer automatically once it's back in range.
 - All data crossing the BLE link is framed with the `GB` (0x47 0x42) magic bytes, version 0x01, and a 12-byte header — this is the same protocol the Android app implements. There is no encryption on the link.

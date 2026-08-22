@@ -20,6 +20,9 @@ void glog_flush_deferred(void);
 typedef void (*glog_capture_fn_t)(const char *line, void *user);
 void glog_set_capture(glog_capture_fn_t fn, void *user);
 
-#endif /* GLOG_H */
+/* Independent mirror capture used by transports that must stream command
+ * output without replacing GhostScript's existing capture sink. */
+void glog_set_mirror_capture(glog_capture_fn_t fn, void *user);
 
+#endif /* GLOG_H */
 
