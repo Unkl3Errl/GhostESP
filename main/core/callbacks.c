@@ -1300,6 +1300,7 @@ typedef struct {
 #endif
 static QueueHandle_t s_pcap_q = NULL;
 static TaskHandle_t s_pcap_writer_task = NULL;
+static bool s_pcap_writer_start_failed = false;
 static pcap_pool_slot_t *s_pcap_pool = NULL;
 static size_t s_pcap_pool_slots = 0;
 static portMUX_TYPE s_pcap_pool_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -1396,7 +1397,7 @@ static void pcap_writer_task(void *arg) {
 }
 
 static inline void ensure_pcap_queue_started(void) {
-    if (s_pcap_q != NULL) {
+    if (s_pcap_q != NULL || s_pcap_writer_start_failed) {
         return;
     }
 
@@ -1406,7 +1407,18 @@ static inline void ensure_pcap_queue_started(void) {
 
     s_pcap_q = xQueueCreate(EAPOL_Q_LEN, sizeof(pcap_q_item_t));
     if (s_pcap_q != NULL && s_pcap_writer_task == NULL) {
-        xTaskCreate_psram(pcap_writer_task, "pcap_wr", 3072, NULL, 5, &s_pcap_writer_task);
+        // This task flushes PCAP data through VFS into the flash-backed virtual
+        // SD. Flash writes disable the external-memory cache, so its stack must
+        // remain in internal RAM or the context save itself can double-fault.
+        BaseType_t writer_rc = xTaskCreate(pcap_writer_task, "pcap_wr", 3072,
+                                           NULL, 5, &s_pcap_writer_task);
+        if (writer_rc != pdPASS) {
+            ESP_LOGE(TAG, "PCAP writer failed to reserve its internal stack");
+            vQueueDelete(s_pcap_q);
+            s_pcap_q = NULL;
+            s_pcap_writer_task = NULL;
+            s_pcap_writer_start_failed = true;
+        }
     }
 }
 
@@ -1477,6 +1489,7 @@ void cleanup_pcap_queue(void) {
         taskEXIT_CRITICAL(&s_pcap_pool_lock);
         heap_caps_free(pool_to_free);
     }
+    s_pcap_writer_start_failed = false;
 }
 
 static const char *suspicious_names[] STORE_DATA_ATTR = {
