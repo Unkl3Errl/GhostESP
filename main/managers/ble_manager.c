@@ -62,8 +62,6 @@ static volatile bool airtag_scanner_active = false;
 
 static esp_timer_handle_t flush_timer = NULL;
 static TaskHandle_t nimble_host_task_handle = NULL;
-static StackType_t *nimble_host_task_stack = NULL;
-static StaticTask_t *nimble_host_task_buffer = NULL;
 static SemaphoreHandle_t nimble_host_exit_sem = NULL;
 static SemaphoreHandle_t ble_disc_complete_sem = NULL;
 static volatile bool ble_pending_clear = false;
@@ -215,31 +213,9 @@ void nimble_host_task(void *param) {
 }
 
 static BaseType_t ble_create_host_task(void) {
-#if defined(CONFIG_SPIRAM)
-    if (!nimble_host_task_stack) {
-        nimble_host_task_stack = heap_caps_malloc(NIMBLE_HOST_TASK_STACK_SIZE * sizeof(StackType_t),
-                                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    }
-    if (!nimble_host_task_buffer) {
-        nimble_host_task_buffer = heap_caps_malloc(sizeof(StaticTask_t),
-                                                   MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    }
-    if (nimble_host_task_stack && nimble_host_task_buffer) {
-        nimble_host_task_handle = xTaskCreateStatic(nimble_host_task, "nimble_host",
-                                                   NIMBLE_HOST_TASK_STACK_SIZE, NULL, 5,
-                                                   nimble_host_task_stack,
-                                                   nimble_host_task_buffer);
-        if (nimble_host_task_handle) {
-            ESP_LOGI(TAG_BLE, "nimble_host stack allocated from PSRAM: %d bytes",
-                     (int)(NIMBLE_HOST_TASK_STACK_SIZE * sizeof(StackType_t)));
-            return pdPASS;
-        }
-    }
-    free(nimble_host_task_stack);
-    free(nimble_host_task_buffer);
-    nimble_host_task_stack = NULL;
-    nimble_host_task_buffer = NULL;
-#endif
+    // NimBLE can enter its NVS store callbacks, which write flash and disable
+    // the external-memory cache. Its stack must therefore remain in internal
+    // RAM even on boards with PSRAM.
     return xTaskCreate(nimble_host_task, "nimble_host", NIMBLE_HOST_TASK_STACK_SIZE,
                        NULL, 5, &nimble_host_task_handle);
 }
