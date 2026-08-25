@@ -4,7 +4,6 @@
 #include "core/callbacks.h"
 #include "core/commands.h"
 #include "core/glog.h"
-#include "core/system_manager.h"
 #include "scans/ble/flipper_scan.h"
 #include "attacks/wifi/dhcp_starvation.h"
 #include "esp_timer.h"
@@ -300,7 +299,16 @@ void sweep_start_async(int wifi_seconds, int ble_seconds) {
     g_sweep_ble_seconds = ble_seconds < 1 ? 10 : ble_seconds;
     g_sweep_result.running = true;
     g_sweep_result.total_phases = 6;
-    xTaskCreate_psram(sweep_task, "sweep", 8192, NULL, 5, NULL);
+
+    // Sweep writes its report through the SD/VFS layer, which can disable the
+    // flash cache. A task stack in PSRAM is inaccessible while the cache is
+    // disabled and causes a double exception during the context save.
+    BaseType_t task_result = xTaskCreate(sweep_task, "sweep", 8192, NULL, 5, NULL);
+    if (task_result != pdPASS) {
+        g_sweep_result.running = false;
+        glog("Failed to start sweep: insufficient internal memory\n");
+        status_display_show_status("Sweep Failed");
+    }
 }
 
 bool sweep_check_done(void) {

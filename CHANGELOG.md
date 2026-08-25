@@ -1,5 +1,13 @@
 # Ghost ESP Changelog
 
+## Revival v2.1.1-mobile.11
+
+- Fixed `sweep` double-exception panics by keeping its flash-writing task stack
+  in internal RAM while the virtual-SD cache is disabled.
+- Kept the NimBLE host stack in internal RAM so BLE scan and NVS callbacks
+  remain accessible during flash operations.
+- Report a visible failure if the sweep task cannot reserve its internal stack.
+
 ## Revival v2.1.1-mobile.10
 
 - Rebased the Android-storage compatibility build on upstream stable v2.1.1.
