@@ -1,5 +1,12 @@
 # Ghost ESP Changelog
 
+## Revival v2.1.1-mobile.12
+
+- Fixed EAPOL and other queued packet captures double-faulting when their PCAP
+  writer flushed data into the flash-backed virtual SD from a PSRAM stack.
+- Report a single clear error and stop queueing capture data if the PCAP writer
+  cannot reserve its required internal stack.
+
 ## Revival v2.1.1-mobile.11
 
 - Fixed `sweep` double-exception panics by keeping its flash-writing task stack
