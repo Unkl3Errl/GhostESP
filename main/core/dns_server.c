@@ -30,6 +30,10 @@
 
 #define DNS_PORT (53)
 #define DNS_MAX_LEN (512)
+#define DNS_SERVER_TASK_STACK_SIZE (6144)
+#define DNS_SERVER_RECEIVE_TIMEOUT_MS (100)
+#define DNS_SERVER_STOP_TIMEOUT_MS (5000)
+#define DNS_SERVER_STOP_POLL_MS (50)
 
 #define OPCODE_MASK (0x7800)
 #define QR_FLAG (1 << 7)
@@ -913,9 +917,7 @@ void dns_server_task(void *pvParameters) {
         int listen_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
         if (listen_sock < 0) {
             ESP_LOGE(TAG, "Sinkhole: socket create failed");
-            handle->started = false;
-            vTaskDelete(NULL);
-            return;
+            goto task_done;
         }
 
         int opt = 1;
@@ -925,9 +927,7 @@ void dns_server_task(void *pvParameters) {
                  sizeof(bind_addr)) < 0) {
             ESP_LOGE(TAG, "Sinkhole: bind failed errno %d", errno);
             close(listen_sock);
-            handle->started = false;
-            vTaskDelete(NULL);
-            return;
+            goto task_done;
         }
         ESP_LOGI(TAG, "Sinkhole bound to 0.0.0.0:53");
 
@@ -935,9 +935,7 @@ void dns_server_task(void *pvParameters) {
         if (fwd_sock < 0) {
             ESP_LOGE(TAG, "Sinkhole: fwd socket failed");
             close(listen_sock);
-            handle->started = false;
-            vTaskDelete(NULL);
-            return;
+            goto task_done;
         }
 
         struct sockaddr_in fwd_bind;
@@ -949,9 +947,7 @@ void dns_server_task(void *pvParameters) {
             ESP_LOGE(TAG, "Sinkhole: fwd bind failed errno %d", errno);
             close(fwd_sock);
             close(listen_sock);
-            handle->started = false;
-            vTaskDelete(NULL);
-            return;
+            goto task_done;
         }
 
         struct sockaddr_in upstream_addr;
@@ -1172,8 +1168,23 @@ void dns_server_task(void *pvParameters) {
 
             int err = bind(sock, (struct sockaddr *)&dest_addr,
                            sizeof(dest_addr));
-            if (err < 0)
+            if (err < 0) {
                 ESP_LOGE(TAG, "Socket unable to bind: errno %d", errno);
+                close(sock);
+                break;
+            }
+
+            struct timeval receive_timeout = {
+                .tv_sec = DNS_SERVER_RECEIVE_TIMEOUT_MS / 1000,
+                .tv_usec = (DNS_SERVER_RECEIVE_TIMEOUT_MS % 1000) * 1000,
+            };
+            if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &receive_timeout,
+                           sizeof(receive_timeout)) < 0) {
+                ESP_LOGE(TAG, "Unable to set DNS receive timeout: errno %d",
+                         errno);
+                close(sock);
+                break;
+            }
 
             while (handle->started) {
                 struct sockaddr_in6 source_addr;
@@ -1190,7 +1201,6 @@ void dns_server_task(void *pvParameters) {
                         continue;
                     }
                     ESP_LOGW(TAG, "DNS recvfrom error %d, closing socket", errno);
-                    close(sock);
                     break;
                 }
 
@@ -1249,7 +1259,11 @@ void dns_server_task(void *pvParameters) {
         }
     }
 
-    vTaskDelete(NULL);
+task_done:
+    handle->started = false;
+    // Park only after all sockets and task-owned resources have been closed.
+    // stop_dns_server() deletes the suspended task before freeing its handle.
+    for (;;) vTaskSuspend(NULL);
 }
 
 // --- Public API ---
@@ -1268,7 +1282,14 @@ dns_server_handle_t start_dns_server(dns_server_config_t *config) {
     memcpy(handle->entry, config->item,
            config->num_of_entries * sizeof(dns_entry_pair_t));
 
-    xTaskCreate(dns_server_task, "dns_server", 4096, handle, 5, &handle->task);
+    BaseType_t task_result = xTaskCreate(dns_server_task, "dns_server",
+                                         DNS_SERVER_TASK_STACK_SIZE,
+                                         handle, 5, &handle->task);
+    if (task_result != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create DNS server task");
+        free(handle);
+        return NULL;
+    }
     return handle;
 }
 
@@ -1379,10 +1400,25 @@ void stop_dns_server(dns_server_handle_t handle) {
     handle->started = false;
     if (handle == s_sinkhole_handle) s_sinkhole_handle = NULL;
 
-    if (handle->sinkhole_mode) {
-        for (int i = 0; i < 20 && eTaskGetState(handle->task) != eDeleted; i++) {
-            vTaskDelay(pdMS_TO_TICKS(50));
+    bool task_suspended = false;
+    int stop_polls = DNS_SERVER_STOP_TIMEOUT_MS / DNS_SERVER_STOP_POLL_MS;
+    for (int i = 0; handle->task && i < stop_polls; i++) {
+        if (eTaskGetState(handle->task) == eSuspended) {
+            task_suspended = true;
+            break;
         }
+        vTaskDelay(pdMS_TO_TICKS(DNS_SERVER_STOP_POLL_MS));
+    }
+    if (handle->task) {
+        if (!task_suspended) {
+            ESP_LOGW(TAG, "DNS task did not stop within %d ms; forcing delete",
+                     DNS_SERVER_STOP_TIMEOUT_MS);
+        }
+        vTaskDelete(handle->task);
+        handle->task = NULL;
+    }
+
+    if (handle->sinkhole_mode) {
         if (handle->task_stack) {
             heap_caps_free(handle->task_stack);
             handle->task_stack = NULL;
@@ -1393,8 +1429,6 @@ void stop_dns_server(dns_server_handle_t handle) {
         }
         free(handle);
     } else {
-        vTaskDelay(pdMS_TO_TICKS(100));
-        if (handle->task) vTaskDelete(handle->task);
         free(handle);
     }
 }
