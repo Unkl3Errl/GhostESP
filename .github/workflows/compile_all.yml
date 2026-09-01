@@ -29,6 +29,19 @@ permissions:
   actions: read
 
 jobs:
+  contract-tests:
+    name: Firmware source contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Verify Karma lifecycle contract
+        run: python3 tools/test_karma_contract.py
+      - name: Verify DNS server lifecycle contract
+        run: python3 tools/test_dns_server_lifecycle_contract.py
+
   build:
     name: Build for ${{ matrix.target.name }}
     runs-on: ubuntu-latest
