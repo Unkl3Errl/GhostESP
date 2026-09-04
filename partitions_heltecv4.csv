@@ -2,4 +2,6 @@
 nvs,        data, nvs,     0x9000,  0x7000,
 app0,       app,  factory, 0x10000, 0x3D0000,
 coredump,   data, coredump,0x3E0000,0x20000,
-storage,    data, fat,     0x400000,0xC00000,
+# Keep the phone-backed spool at the same physical range used by Bruce and
+# Marauder so normal offset-0 firmware changes preserve one shared FAT volume.
+storage,    data, fat,     0xCF0000,0x300000,

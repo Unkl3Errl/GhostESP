@@ -652,16 +652,29 @@ void handle_sd_cmd(int argc, char **argv) {
         }
 
         size_t written = fwrite(decoded, 1, olen, f);
-        int write_failed = ferror(f);
-        fclose(f);
+        bool io_ok = written == olen && !ferror(f) && fflush(f) == 0;
+        if (io_ok) {
+            int fd = fileno(f);
+            io_ok = fd < 0 || fsync(fd) == 0;
+        }
+        if (fclose(f) != 0) io_ok = false;
         free(decoded);
 
-        glog("SD:WRITE:bytes=%zu\n", written);
-        if (write_failed || written != olen) {
+        if (written != olen) {
             glog("SD:ERR:short_write:%s\n", path);
-        } else {
-            glog("SD:OK:created:%s\n", path);
+            sd_cli_cleanup();
+            return;
         }
+        uint64_t durable_size = 0;
+        uint32_t durable_checksum = 0;
+        if (!io_ok || !sd_cli_file_crc32(path, &durable_size, &durable_checksum) ||
+            durable_size != olen) {
+            glog("SD:ERR:durability_check_failed:%s\n", path);
+            sd_cli_cleanup();
+            return;
+        }
+        glog("SD:WRITE:bytes=%zu\n", written);
+        glog("SD:OK:created:%s\n", path);
         sd_cli_cleanup();
         return;
     }
@@ -714,6 +727,18 @@ void handle_sd_cmd(int argc, char **argv) {
             return;
         }
 
+        uint64_t original_size = 0;
+        struct stat original_info;
+        if (stat(path, &original_info) == 0) {
+            if (!S_ISREG(original_info.st_mode)) {
+                free(decoded);
+                glog("SD:ERR:cannot_open:%s\n", path);
+                sd_cli_cleanup();
+                return;
+            }
+            original_size = (uint64_t)original_info.st_size;
+        }
+
         FILE *f = fopen(path, "ab");
         if (!f) {
             free(decoded);
@@ -723,16 +748,29 @@ void handle_sd_cmd(int argc, char **argv) {
         }
 
         size_t written = fwrite(decoded, 1, olen, f);
-        int write_failed = ferror(f);
-        fclose(f);
+        bool io_ok = written == olen && !ferror(f) && fflush(f) == 0;
+        if (io_ok) {
+            int fd = fileno(f);
+            io_ok = fd < 0 || fsync(fd) == 0;
+        }
+        if (fclose(f) != 0) io_ok = false;
         free(decoded);
 
-        glog("SD:APPEND:bytes=%zu\n", written);
-        if (write_failed || written != olen) {
+        if (written != olen) {
             glog("SD:ERR:short_write:%s\n", path);
-        } else {
-            glog("SD:OK:appended:%s\n", path);
+            sd_cli_cleanup();
+            return;
         }
+        uint64_t durable_size = 0;
+        uint32_t durable_checksum = 0;
+        if (!io_ok || !sd_cli_file_crc32(path, &durable_size, &durable_checksum) ||
+            durable_size != original_size + olen) {
+            glog("SD:ERR:durability_check_failed:%s\n", path);
+            sd_cli_cleanup();
+            return;
+        }
+        glog("SD:APPEND:bytes=%zu\n", written);
+        glog("SD:OK:appended:%s\n", path);
         sd_cli_cleanup();
         return;
     }

@@ -230,6 +230,61 @@ void handle_startwd(int argc, char **argv) {
     }
 }
 
+void handle_tagpoi(int argc, char **argv) {
+    if (!wardriving_is_active()) {
+        glog("POI tag failed: wardriving is not active.\n");
+        status_display_show_status("POI: No Wardrive");
+        return;
+    }
+
+    gps_t gps_snapshot = {0};
+    bool using_peer = false;
+    bool recent = gps_manager_get_recent_active_gps_snapshot(&gps_snapshot, &using_peer);
+    bool valid_fix = recent && gps_snapshot.valid && gps_snapshot.fix >= GPS_FIX_GPS &&
+                     gps_snapshot.fix_mode >= GPS_MODE_2D && gps_snapshot.sats_in_use >= 3 &&
+                     gps_snapshot.latitude >= -90.0 && gps_snapshot.latitude <= 90.0 &&
+                     gps_snapshot.longitude >= -180.0 && gps_snapshot.longitude <= 180.0 &&
+                     (gps_snapshot.latitude != 0.0 || gps_snapshot.longitude != 0.0);
+    if (!valid_fix) {
+        glog("POI tag failed: GPS fix is unavailable or stale.\n");
+        status_display_show_status("POI: No GPS Fix");
+        return;
+    }
+
+    char requested_label[64] = {0};
+    size_t label_len = 0;
+    for (int i = 1; i < argc && label_len < sizeof(requested_label) - 1; i++) {
+        int written = snprintf(requested_label + label_len,
+                               sizeof(requested_label) - label_len,
+                               "%s%s",
+                               label_len == 0 ? "" : " ",
+                               argv[i]);
+        if (written < 0) break;
+        size_t available = sizeof(requested_label) - label_len;
+        label_len += (size_t)written >= available ? available - 1 : (size_t)written;
+    }
+
+    char saved_label[64] = {0};
+    esp_err_t err = csv_tag_poi(requested_label[0] ? requested_label : NULL,
+                                &gps_snapshot,
+                                using_peer,
+                                saved_label,
+                                sizeof(saved_label));
+    if (err != ESP_OK) {
+        glog("POI tag failed: POI file is unavailable (%s).\n", esp_err_to_name(err));
+        status_display_show_status("POI: Write Fail");
+        return;
+    }
+
+    glog("POI tagged: %s (%.6f, %.6f; %u sats; %s GPS).\n",
+         saved_label,
+         gps_snapshot.latitude,
+         gps_snapshot.longitude,
+         (unsigned)gps_snapshot.sats_in_use,
+         using_peer ? "peer" : "local");
+    status_display_show_status("POI Tagged");
+}
+
 void handle_crash(int argc, char **argv) {
     glog("Triggering crash for coredump test...\n");
     (void)argc;

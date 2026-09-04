@@ -41,6 +41,10 @@ jobs:
         run: python3 tools/test_karma_contract.py
       - name: Verify DNS server lifecycle contract
         run: python3 tools/test_dns_server_lifecycle_contract.py
+      - name: Verify mobile storage contract
+        run: python3 tools/test_mobile_storage_contract.py
+      - name: Verify POI tagging contract
+        run: python3 tools/test_poi_tag_contract.py
 
   build:
     name: Build for ${{ matrix.target.name }}

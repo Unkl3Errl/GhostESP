@@ -41,6 +41,7 @@ void stop_wardriving(void);
 void wardriving_set_peer_assist(bool enabled);
 void wardriving_expect_peer_assist(bool enabled);
 bool wardriving_is_helper_mode(void);
+bool wardriving_is_active(void);
 bool wardriving_is_peer_assist_active(void);
 bool wardriving_has_peer_helper(void);
 void wardriving_register_stream_handler(void);

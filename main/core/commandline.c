@@ -316,6 +316,7 @@ void register_commands() {
     register_command("stop", handle_stop_flipper);
     register_command("reboot", handle_reboot);
     register_command("startwd", handle_startwd);
+    register_command("tagpoi", handle_tagpoi);
     register_command("wdstream", handle_wdstream_cmd);
     register_command("gpsinfo", handle_gps_info);
     register_command("gpspin", handle_gps_pin);
@@ -471,5 +472,4 @@ void register_commands() {
 
     glog("Registered Commands\n");
 }
-
 

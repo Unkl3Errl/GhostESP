@@ -67,6 +67,11 @@ esp_err_t csv_file_open(const char *base_file_name);
 bool csv_file_is_open(void);
 bool csv_file_is_active_path(const char *path);
 esp_err_t csv_write_data_to_buffer(wardriving_data_t *data);
+esp_err_t csv_tag_poi(const char *requested_label,
+                      const gps_t *gps,
+                      bool using_peer,
+                      char *saved_label,
+                      size_t saved_label_len);
 esp_err_t csv_flush_buffer_to_file();
 bool csv_buffer_has_pending_data(void);
 uint32_t csv_get_unique_wifi_ap_count(void);

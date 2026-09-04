@@ -516,6 +516,38 @@ void sd_card_get_cached_stats(sd_card_cached_stats_t *out) {
 static wl_handle_t s_wl_handle = WL_INVALID_HANDLE;
 static bool s_virtual_storage_mounted = false;
 
+static bool virtual_storage_has_payload(const char *path, unsigned depth) {
+    DIR *directory = opendir(path);
+    if (!directory) return true; /* An unreadable entry is never safe to erase. */
+    if (depth >= 8) {
+        closedir(directory);
+        return true;
+    }
+
+    struct dirent *entry;
+    while ((entry = readdir(directory)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+        char child[512];
+        int length = snprintf(child, sizeof(child), "%s/%s", path, entry->d_name);
+        if (length <= 0 || (size_t)length >= sizeof(child)) {
+            closedir(directory);
+            return true;
+        }
+        struct stat info;
+        if (stat(child, &info) != 0) {
+            closedir(directory);
+            return true;
+        }
+        if ((S_ISREG(info.st_mode) && info.st_size > 0) ||
+            (S_ISDIR(info.st_mode) && virtual_storage_has_payload(child, depth + 1))) {
+            closedir(directory);
+            return true;
+        }
+    }
+    closedir(directory);
+    return false;
+}
+
 static esp_err_t mount_virtual_storage(void) {
     if (s_virtual_storage_mounted) {
         ESP_LOGI(TAG, "Virtual storage already mounted");
@@ -552,6 +584,25 @@ static esp_err_t mount_virtual_storage(void) {
         ESP_LOGE(TAG, "Failed to mount virtual storage: %s", esp_err_to_name(ret));
         toast_show("Virtual storage mount failed", TOAST_ERROR);
         return ret;
+    }
+
+    uint64_t total_bytes = 0;
+    uint64_t free_bytes = 0;
+    if (esp_vfs_fat_info("/mnt", &total_bytes, &free_bytes) == ESP_OK &&
+        total_bytes > 0 && free_bytes == 0 && !virtual_storage_has_payload("/mnt", 0)) {
+        /* A cross-firmware FAT volume can mount while exposing no recoverable
+         * payload and no free clusters. Only repair the all-empty case so a
+         * genuinely full or unreadable spool is never erased. */
+        ESP_LOGW(TAG, "Repairing unusable Android virtual storage");
+        ret = esp_vfs_fat_spiflash_format_cfg_rw_wl("/mnt", "storage", &mount_config);
+        if (ret != ESP_OK || esp_vfs_fat_info("/mnt", &total_bytes, &free_bytes) != ESP_OK ||
+            free_bytes == 0) {
+            ESP_LOGE(TAG, "Failed to repair Android virtual storage: %s", esp_err_to_name(ret));
+            esp_vfs_fat_spiflash_unmount_rw_wl("/mnt", s_wl_handle);
+            s_wl_handle = WL_INVALID_HANDLE;
+            toast_show("Virtual storage repair failed", TOAST_ERROR);
+            return ret == ESP_OK ? ESP_FAIL : ret;
+        }
     }
 
     s_virtual_storage_mounted = true;
