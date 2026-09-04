@@ -616,6 +616,7 @@ const CMD = {
   // GPS
   gpsInfo:         (stop) => ({ cmd: stop ? 'gpsinfo -s' : 'gpsinfo', risky: false, stopFirst: false, cat: 'GPS', desc: 'GPS information' }),
   startWardrive:   (stop) => ({ cmd: stop ? 'startwd -s' : 'startwd', risky: !stop, stopFirst: !stop, cat: 'GPS', desc: 'Start wardriving' }),
+  tagPoi:          () => ({ cmd: 'tagpoi', risky: false, stopFirst: false, cat: 'GPS', desc: 'Tag the current wardrive position' }),
 
   // SD Card
   sdStatus:        () => ({ cmd: 'sd status',       risky: false, stopFirst: false, cat: 'Files', desc: 'SD card status' }),
@@ -2021,6 +2022,7 @@ function buildDashboard() {
     { label: 'Scan BLE', command: CMD.bleScan('spam').cmd, icon: 'BT' },
     { label: 'Scan Flippers', command: CMD.bleScan('flipper').cmd, icon: 'FL' },
     { label: 'GPS Info', command: CMD.gpsInfo().cmd, icon: 'GP' },
+    { label: 'Tag POI', command: CMD.tagPoi().cmd, icon: 'PO' },
     { label: 'WiFi Status', command: CMD.wifiStatus().cmd, icon: 'WS' },
     { label: 'Stop All', command: CMD.stop().cmd, icon: 'ST' },
   ];

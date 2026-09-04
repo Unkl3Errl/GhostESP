@@ -407,6 +407,7 @@ void handle_help(int argc, char **argv) {
         glog("gpspin\n    Set GPS RX pin for external GPS module.\n    Usage: gpspin <pin>\n\n");
         glog("gpsbaud\n    Set GPS baud rate or auto-detect it.\n    Usage: gpsbaud <auto|0|4800|9600|19200|38400|57600|115200>\n\n");
         glog("startwd\n    Start GPS wardriving.\n    Usage: startwd [-s] [--helper] [--channels <csv>] [--hop <ms>] [--weighted]\n\n");
+        glog("tagpoi\n    Tag the current GPS position during an active wardrive.\n    Usage: tagpoi [label]\n\n");
         return;
     }
     if (strcmp(category, "shell") == 0) {

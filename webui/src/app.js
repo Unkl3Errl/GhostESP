@@ -533,6 +533,7 @@ function buildDashboard() {
     { label: 'Scan BLE', command: CMD.bleScan('spam').cmd, icon: 'BT' },
     { label: 'Scan Flippers', command: CMD.bleScan('flipper').cmd, icon: 'FL' },
     { label: 'GPS Info', command: CMD.gpsInfo().cmd, icon: 'GP' },
+    { label: 'Tag POI', command: CMD.tagPoi().cmd, icon: 'PO' },
     { label: 'WiFi Status', command: CMD.wifiStatus().cmd, icon: 'WS' },
     { label: 'Stop All', command: CMD.stop().cmd, icon: 'ST' },
   ];

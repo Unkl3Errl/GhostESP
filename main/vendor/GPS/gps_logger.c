@@ -98,6 +98,12 @@ static TickType_t csv_last_sync_tick = 0;
 static portMUX_TYPE csv_state_mux = portMUX_INITIALIZER_UNLOCKED;
 static uint32_t csv_active_producers = 0;
 static TaskHandle_t csv_close_waiter = NULL;
+static char poi_part_path[GPS_MAX_FILE_NAME_LENGTH] = {0};
+static char poi_final_path[GPS_MAX_FILE_NAME_LENGTH] = {0};
+static uint32_t poi_tag_count = 0;
+static bool poi_file_created = false;
+
+#define POI_CSV_HEADER "Name,Timestamp,Latitude,Longitude,AltitudeMeters,AccuracyMeters,Satellites,Source\n"
 
 static void csv_request_flush(void) {
     csv_flush_requested = true;
@@ -696,8 +702,161 @@ bool csv_file_is_open(void) {
 }
 
 bool csv_file_is_active_path(const char *path) {
-    return path && csv_file_is_open() && csv_file_path[0] != '\0' &&
-           strcmp(path, csv_file_path) == 0;
+    if (!path || !csv_file_is_open()) return false;
+    if (csv_file_path[0] != '\0' && strcmp(path, csv_file_path) == 0) return true;
+    return poi_file_created && poi_part_path[0] != '\0' && strcmp(path, poi_part_path) == 0;
+}
+
+static void csv_poi_reset_session(void) {
+    poi_part_path[0] = '\0';
+    poi_final_path[0] = '\0';
+    poi_tag_count = 0;
+    poi_file_created = false;
+}
+
+static bool csv_poi_choose_paths(void) {
+    int index = get_next_csv_file_index("wardrive_poi");
+    if (index < 0) index = 0;
+
+    for (int attempts = 0; attempts < 10000; attempts++, index++) {
+        int final_len = snprintf(poi_final_path,
+                                 sizeof(poi_final_path),
+                                 SD_DIR_GPS "/wardrive_poi_%d.csv",
+                                 index);
+        int part_len = snprintf(poi_part_path,
+                                sizeof(poi_part_path),
+                                SD_DIR_GPS "/wardrive_poi_%d.csv.part",
+                                index);
+        if (final_len <= 0 || part_len <= 0 ||
+            (size_t)final_len >= sizeof(poi_final_path) ||
+            (size_t)part_len >= sizeof(poi_part_path)) {
+            poi_part_path[0] = '\0';
+            poi_final_path[0] = '\0';
+            return false;
+        }
+        if (!sd_card_exists(poi_final_path) && !sd_card_exists(poi_part_path)) return true;
+    }
+
+    poi_part_path[0] = '\0';
+    poi_final_path[0] = '\0';
+    return false;
+}
+
+esp_err_t csv_tag_poi(const char *requested_label,
+                      const gps_t *gps,
+                      bool using_peer,
+                      char *saved_label,
+                      size_t saved_label_len) {
+    if (!gps || !saved_label || saved_label_len == 0) return ESP_ERR_INVALID_ARG;
+    saved_label[0] = '\0';
+    if (!csv_file_is_open() || strcmp(csv_base_name, "wardriving") != 0 || !csv_mutex) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    bool display_was_suspended = false;
+    if (!sd_card_jit_begin(&display_was_suspended, true)) return ESP_FAIL;
+
+    esp_err_t result = ESP_FAIL;
+    xSemaphoreTake(csv_mutex, portMAX_DELAY);
+    if (csv_closing || !csv_buffer || strcmp(csv_base_name, "wardriving") != 0) {
+        result = ESP_ERR_INVALID_STATE;
+        goto done;
+    }
+
+    if (poi_part_path[0] == '\0' && !csv_poi_choose_paths()) {
+        result = ESP_ERR_NOT_FOUND;
+        goto done;
+    }
+
+    uint32_t next_number = poi_tag_count + 1;
+    char label[64];
+    if (requested_label && requested_label[0] != '\0') {
+        snprintf(label, sizeof(label), "%s", requested_label);
+    } else {
+        snprintf(label, sizeof(label), "POI %lu", (unsigned long)next_number);
+    }
+
+    gps_date_t date = gps->date;
+    gps_time_t tim = gps->tim;
+    bool date_valid = is_valid_date(&date);
+    bool time_valid = tim.hour <= 23 && tim.minute <= 59 && tim.second <= 59;
+    if (!date_valid || !time_valid) resolve_timestamp_for_file(&date, &tim);
+
+    char timestamp[32];
+    snprintf(timestamp,
+             sizeof(timestamp),
+             "%04u-%02u-%02u %02u:%02u:%02u",
+             (unsigned)gps_get_absolute_year(date.year),
+             (unsigned)date.month,
+             (unsigned)date.day,
+             (unsigned)tim.hour,
+             (unsigned)tim.minute,
+             (unsigned)tim.second);
+
+    char escaped_label[132];
+    csv_escape_field(escaped_label, sizeof(escaped_label), label);
+    FILE *poi_file = fopen(poi_part_path, poi_tag_count == 0 ? "wb" : "ab");
+    if (!poi_file) goto done;
+
+    bool write_ok = true;
+    if (poi_tag_count == 0) {
+        size_t header_len = strlen(POI_CSV_HEADER);
+        write_ok = fwrite(POI_CSV_HEADER, 1, header_len, poi_file) == header_len;
+    }
+    if (write_ok) {
+        int written = fprintf(poi_file,
+                              "%s,%s,%.7f,%.7f,%.1f,%.1f,%u,%s\n",
+                              escaped_label,
+                              timestamp,
+                              gps->latitude,
+                              gps->longitude,
+                              gps->altitude,
+                              gps->dop_h * 5.0,
+                              (unsigned)gps->sats_in_use,
+                              using_peer ? "peer" : "local");
+        write_ok = written > 0;
+    }
+    if (write_ok) write_ok = fflush(poi_file) == 0;
+    if (write_ok) {
+        int fd = fileno(poi_file);
+        write_ok = fd < 0 || fsync(fd) == 0;
+    }
+    if (fclose(poi_file) != 0) write_ok = false;
+    if (!write_ok) goto done;
+
+    poi_tag_count = next_number;
+    poi_file_created = true;
+    snprintf(saved_label, saved_label_len, "%s", label);
+    result = ESP_OK;
+
+done:
+    xSemaphoreGive(csv_mutex);
+    sd_card_jit_end(display_was_suspended);
+    return result;
+}
+
+static void csv_poi_finalize(void) {
+    if (!poi_file_created || poi_part_path[0] == '\0' || poi_final_path[0] == '\0') return;
+
+    bool display_was_suspended = false;
+    if (!sd_card_jit_begin(&display_was_suspended, true)) {
+        glog("POI finalize failed: storage is unavailable; retaining %s.\n", poi_part_path);
+        return;
+    }
+
+    if (rename(poi_part_path, poi_final_path) == 0) {
+        glog("POI log finalized: %s (%lu point%s).\n",
+             poi_final_path,
+             (unsigned long)poi_tag_count,
+             poi_tag_count == 1 ? "" : "s");
+        toast_show("POI log saved", TOAST_SUCCESS);
+        poi_file_created = false;
+        poi_part_path[0] = '\0';
+    } else {
+        glog("POI finalize failed: %s; retaining %s.\n", strerror(errno), poi_part_path);
+    }
+
+    sd_card_jit_end(display_was_suspended);
 }
 
 esp_err_t csv_file_open(const char *base_file_name) {
@@ -724,6 +883,7 @@ esp_err_t csv_file_open(const char *base_file_name) {
     csv_jit_file_written = false;
     csv_jit_file_queued = false;
     csv_writing_final_chunk = false;
+    csv_poi_reset_session();
 
     csv_build_pre_header();
 
@@ -1194,6 +1354,7 @@ void csv_file_close() {
             toast_show("GPS log saved", TOAST_SUCCESS);
         }
     }
+    csv_poi_finalize();
     buffer_offset = 0;
     csv_header_pending_uart = false;
     if (csv_buffer) { free(csv_buffer); csv_buffer = NULL; }

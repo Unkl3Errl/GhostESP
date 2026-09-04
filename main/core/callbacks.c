@@ -2649,6 +2649,10 @@ bool wardriving_is_helper_mode(void) {
     return wardrive_role == WARDRIVE_ROLE_HELPER;
 }
 
+bool wardriving_is_active(void) {
+    return wardriving_hopping_active && wardrive_role == WARDRIVE_ROLE_PRIMARY;
+}
+
 bool wardriving_is_peer_assist_active(void) {
     return wardrive_peer_assist_active;
 }

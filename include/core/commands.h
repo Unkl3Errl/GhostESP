@@ -111,6 +111,7 @@ void handle_sinkhole_cmd(int argc, char **argv);
 void handle_gps_info(int argc, char **argv);
 void handle_gps_pin(int argc, char **argv);
 void handle_gps_baud(int argc, char **argv);
+void handle_tagpoi(int argc, char **argv);
 
 #ifdef CONFIG_WITH_ETHERNET
 // Ethernet

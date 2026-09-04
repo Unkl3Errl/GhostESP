@@ -148,6 +148,7 @@ const CMD = {
   // GPS
   gpsInfo:         (stop) => ({ cmd: stop ? 'gpsinfo -s' : 'gpsinfo', risky: false, stopFirst: false, cat: 'GPS', desc: 'GPS information' }),
   startWardrive:   (stop) => ({ cmd: stop ? 'startwd -s' : 'startwd', risky: !stop, stopFirst: !stop, cat: 'GPS', desc: 'Start wardriving' }),
+  tagPoi:          () => ({ cmd: 'tagpoi', risky: false, stopFirst: false, cat: 'GPS', desc: 'Tag the current wardrive position' }),
 
   // SD Card
   sdStatus:        () => ({ cmd: 'sd status',       risky: false, stopFirst: false, cat: 'Files', desc: 'SD card status' }),
