@@ -43,6 +43,8 @@ jobs:
         run: python3 tools/test_dns_server_lifecycle_contract.py
       - name: Verify mobile storage contract
         run: python3 tools/test_mobile_storage_contract.py
+      - name: Verify Wi-Fi backend contract
+        run: python3 tools/test_wifi_backend_contract.py
       - name: Verify POI tagging contract
         run: python3 tools/test_poi_tag_contract.py
 
