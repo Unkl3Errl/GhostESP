@@ -220,6 +220,11 @@ void handle_help(int argc, char **argv) {
         glog("listadv\n");
         glog("    Description: List parsed BLE advertisers from blescan -adv\n");
         glog("    Usage: listadv\n\n");
+#ifdef CONFIG_HAS_BADBLE
+        glog("badble\n");
+        glog("    Description: Control the BLE keyboard and run BadBLE scripts.\n");
+        glog("    Usage: badble <status|list|run|stop|keyboard_start|keyboard_stop|type|keysend|name|set_name>\n\n");
+#endif
         return;
     }
 
@@ -401,8 +406,30 @@ void handle_help(int argc, char **argv) {
         glog("loglevel\n");
         glog("    Description: View or change the global ESP-IDF log level.\n");
         glog("    Usage: loglevel [none|error|warn|info|debug|verbose]\n\n");
+#if defined(CONFIG_IDF_TARGET_ESP32P4)
+        glog("c6ota\n");
+        glog("    Description: Check or force the ESP32-P4 network coprocessor update.\n");
+        glog("    Usage: c6ota [force]\n\n");
+#endif
+#ifdef CONFIG_CROWPANEL_ADVANCE_RGB_LCD
+        glog("lcdclock\n");
+        glog("    Description: View RGB panel statistics or set the pixel clock.\n");
+        glog("    Usage: lcdclock [8..21 MHz]\n\n");
+        glog("lcddiag\n");
+        glog("    Description: View or reset RGB panel diagnostics.\n");
+        glog("    Usage: lcddiag [reset]\n\n");
+        glog("lcdsimd\n");
+        glog("    Description: View, enable, disable, or reset S3 SIMD drawing statistics.\n");
+        glog("    Usage: lcdsimd [on|off|reset]\n\n");
+#endif
+        glog("fav / favorites\n");
+        glog("    Description: List and manage favorite menu items and files.\n");
+        glog("    Usage: fav [list|add <name>|remove <name>|toggle <name>|clear|bypass <on|off|toggle>]\n\n");
+#ifdef CONFIG_WITH_STATUS_DISPLAY
+        glog("statusidle\n");
         glog("    Description: View or change the status display idle animation (status OLED only).\n");
         glog("    Usage: statusidle [list|set <life|ghost|starfield|hud|matrix|ghosts|spiral|leaves|bouncing|0|1|2|3|4|5|6|7|8>]\n\n");
+#endif
         return;
     }
     if (strcmp(category, "gps") == 0) {

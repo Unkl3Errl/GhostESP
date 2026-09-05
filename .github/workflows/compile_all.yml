@@ -45,6 +45,8 @@ jobs:
         run: python3 tools/test_mobile_storage_contract.py
       - name: Verify Wi-Fi backend contract
         run: python3 tools/test_wifi_backend_contract.py
+      - name: Verify command help contract
+        run: python3 tools/test_command_help_contract.py
       - name: Verify POI tagging contract
         run: python3 tools/test_poi_tag_contract.py
 
