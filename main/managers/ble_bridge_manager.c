@@ -1,4 +1,8 @@
+#include "sdkconfig.h"
 #include "managers/ble_bridge_manager.h"
+#ifdef CONFIG_HAS_BADBLE
+#include "managers/badble_manager.h"
+#endif
 
 #include "core/esp_comm_manager.h"
 #include "core/glog.h"
@@ -21,7 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifndef CONFIG_IDF_TARGET_ESP32S2
+#if !defined(CONFIG_IDF_TARGET_ESP32S2) && !defined(GHOSTESP_NO_NATIVE_BLE)
 #include "host/ble_att.h"
 #include "host/ble_gap.h"
 #include "host/ble_gatt.h"
@@ -131,7 +135,7 @@ static void bridge_local_capture(const char *line, void *user_data);
 static bool bridge_load_bridged(void);
 static void bridge_save_bridged(bool bridged);
 
-#ifndef CONFIG_IDF_TARGET_ESP32S2
+#if !defined(CONFIG_IDF_TARGET_ESP32S2) && !defined(GHOSTESP_NO_NATIVE_BLE)
 static int bridge_gatt_access_cb(uint16_t conn_handle, uint16_t attr_handle,
                                  struct ble_gatt_access_ctxt *ctxt, void *arg);
 static int bridge_gap_event_cb(struct ble_gap_event *event, void *arg);
@@ -232,7 +236,7 @@ static size_t bridge_notify_payload_cap(void) {
     return cap;
 }
 
-#ifndef CONFIG_IDF_TARGET_ESP32S2
+#if !defined(CONFIG_IDF_TARGET_ESP32S2) && !defined(GHOSTESP_NO_NATIVE_BLE)
 static void bridge_clear_notify_queue(void) {
     if (!s_bridge.notify_queue) {
         return;
@@ -468,6 +472,21 @@ static bool bridge_is_local_ctrl(const char *cmd) {
     return strcmp(lower, "stop") == 0;
 }
 
+#if !defined(CONFIG_IDF_TARGET_ESP32S2) && !defined(GHOSTESP_NO_NATIVE_BLE)
+/* Drops a GATT registration flag left over from a previous NimBLE host
+ * incarnation. Full host teardown (ble_hs_deinit) owns the single legal
+ * ble_gatts_stop() per incarnation, so profiles are never torn down on stop;
+ * instead the flag is cleared at the start of the next host incarnation and
+ * the profile re-registers on the fresh, empty GATT database. */
+static void bridge_invalidate_stale_gatt(void) {
+    if (s_bridge.gatt_registered) {
+        ESP_LOGI(TAG, "clearing stale GATT registration from previous session");
+        s_bridge.gatt_registered = false;
+        s_bridge.tx_val_handle = 0;
+    }
+}
+#endif
+
 static void bridge_stop_locked(void) {
     s_bridge.running = false;
     bridge_reset_reassembly();
@@ -481,7 +500,7 @@ static void bridge_stop_locked(void) {
         xQueueReset(s_bridge.local_command_queue);
     }
     bridge_unlock();
-#ifndef CONFIG_IDF_TARGET_ESP32S2
+#if !defined(CONFIG_IDF_TARGET_ESP32S2) && !defined(GHOSTESP_NO_NATIVE_BLE)
     bridge_clear_notify_queue();
     if (s_bridge.ble_connected && s_bridge.conn_handle != BLE_HS_CONN_HANDLE_NONE) {
         (void)ble_gap_terminate(s_bridge.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
@@ -494,6 +513,12 @@ static void bridge_stop_locked(void) {
     s_bridge.conn_handle = BLE_HS_CONN_HANDLE_NONE;
 #endif
     esp_comm_manager_disconnect();
+    /* NOTE: the GATT database is deliberately NOT released here. NimBLE
+     * allows exactly one ble_gatts_stop() per host incarnation and full host
+     * teardown (ble_hs_deinit) owns it - releasing the database here would
+     * double-stop it and fault when the host is deinitialized afterwards. The
+     * registration flag is simply kept; the next full host (re)initialization
+     * clears it and re-registers on the fresh, empty GATT database. */
 }
 
 static void bridge_request_stop(const char *reason) {
@@ -691,11 +716,11 @@ static void bridge_task(void *arg) {
     for (;;) {
         bridge_notify_item_t item = {0};
         if (xQueueReceive(s_bridge.notify_queue, &item, pdMS_TO_TICKS(100)) == pdTRUE) {
-#ifndef CONFIG_IDF_TARGET_ESP32S2
+#if !defined(CONFIG_IDF_TARGET_ESP32S2) && !defined(GHOSTESP_NO_NATIVE_BLE)
             int notify_result = bridge_notify_item(&item);
 #endif
             free(item.data);
-#ifndef CONFIG_IDF_TARGET_ESP32S2
+#if !defined(CONFIG_IDF_TARGET_ESP32S2) && !defined(GHOSTESP_NO_NATIVE_BLE)
             if (notify_result == 0) {
                 bridge_fail_transport(item.conn_handle, item.connection_generation,
                                       "notification retries exhausted");
@@ -737,7 +762,7 @@ static void bridge_local_task(void *arg) {
     vTaskDelete(NULL);
 }
 
-#ifndef CONFIG_IDF_TARGET_ESP32S2
+#if !defined(CONFIG_IDF_TARGET_ESP32S2) && !defined(GHOSTESP_NO_NATIVE_BLE)
 static bool bridge_start_advertising(void) {
     if (ble_gap_adv_active()) {
         (void)ble_gap_adv_stop();
@@ -1092,6 +1117,20 @@ static bool bridge_create_task(void) {
         ;
 }
 
+// Free task stack/TCB after the bridge task has exited and cleared its handle.
+// Must only run from a different task once task_handle == NULL (the exiting
+// task's own stack is still in use inside bridge_task). Returns 4k+TCB to the
+// heap while the bridge sits idle.
+static void bridge_destroy_task_resources(void) {
+    if (s_bridge.task_handle != NULL) {
+        return;
+    }
+    heap_caps_free(s_bridge.task_stack);
+    heap_caps_free(s_bridge.task_tcb);
+    s_bridge.task_stack = NULL;
+    s_bridge.task_tcb = NULL;
+}
+
 static void bridge_wait_and_send_task(void *arg) {
     (void)arg;
     for (int i = 0; i < 30; i++) {
@@ -1121,16 +1160,31 @@ static void bridge_kick_wait_and_send(void) {
 }
 
 bool ble_bridge_start(void) {
-#ifdef CONFIG_IDF_TARGET_ESP32S2
+#if defined(CONFIG_IDF_TARGET_ESP32S2) || defined(GHOSTESP_NO_NATIVE_BLE)
     glog("blebridge is not supported on ESP32-S2.\n");
     return false;
 #else
+#ifdef CONFIG_HAS_BADBLE
+    if (badble_manager_is_running()) {
+        bridge_log("BadBLE is active; stop it before starting the bridge");
+        return false;
+    }
+#endif
     if (s_bridge.running) {
         bridge_log("already running");
         return true;
     }
     (void)nvs_flash_init();
     (void)bridge_load_last_peer(s_bridge.last_peer, sizeof(s_bridge.last_peer));
+
+    if (!ble_is_initialized()) {
+        /* Fresh NimBLE host incarnation: any GATT registration flag from a
+         * previous incarnation is stale (profiles are never torn down on
+         * stop - full host teardown owns the single legal ble_gatts_stop).
+         * Clear it so the bridge re-registers on the fresh, empty GATT
+         * database below. */
+        bridge_invalidate_stale_gatt();
+    }
 
     ble_init();
     if (!ble_wait_for_ready()) {
@@ -1265,7 +1319,7 @@ void ble_bridge_apply_saved_enabled(void) {
 }
 
 void ble_bridge_stop(void) {
-#ifndef CONFIG_IDF_TARGET_ESP32S2
+#if !defined(CONFIG_IDF_TARGET_ESP32S2) && !defined(GHOSTESP_NO_NATIVE_BLE)
     if (!s_bridge.running) {
         return;
     }
@@ -1274,6 +1328,7 @@ void ble_bridge_stop(void) {
     for (int i = 0; i < 20 && (s_bridge.task_handle || s_bridge.local_task_handle); ++i) {
         vTaskDelay(pdMS_TO_TICKS(50));
     }
+    bridge_destroy_task_resources();
     bridge_log("stopped");
 #endif
 }
@@ -1294,7 +1349,7 @@ static void bridge_print_status(bool machine) {
     }
 
     const char *ble_state = "idle";
-#ifndef CONFIG_IDF_TARGET_ESP32S2
+#if !defined(CONFIG_IDF_TARGET_ESP32S2) && !defined(GHOSTESP_NO_NATIVE_BLE)
     if (s_bridge.ble_connected) {
         ble_state = "connected 1";
     } else if (s_bridge.running && ble_gap_adv_active()) {

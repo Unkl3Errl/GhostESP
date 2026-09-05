@@ -214,18 +214,16 @@ static bool sd_cli_display_suspended = false;
 
 static bool sd_cli_ensure_mounted(void) {
     if (sd_card_manager.is_initialized) return true;
-#if defined(CONFIG_IS_S3TWATCH) || defined(CONFIG_HELTEC_ANDROID_STORAGE)
+#if defined(CONFIG_IS_S3TWATCH) || defined(CONFIG_IS_ATOMS3R) || defined(CONFIG_HELTEC_ANDROID_STORAGE)
     /* Recover from a transient/deferred boot mount failure on demand. */
     if (sd_card_init() == ESP_OK) return true;
 #endif
-#ifdef CONFIG_BUILD_CONFIG_TEMPLATE
-    if (strcmp(CONFIG_BUILD_CONFIG_TEMPLATE, "somethingsomething") == 0) {
+    if (sd_card_needs_jit_mount()) {
         if (sd_card_mount_for_flush(&sd_cli_display_suspended) == ESP_OK) {
             sd_cli_jit_mounted = true;
             return true;
         }
     }
-#endif
     return false;
 }
 
@@ -235,13 +233,11 @@ static void sd_cli_cleanup(void) {
         g_sd_cli_paths[i] = NULL;
     }
     g_sd_cli_count = 0;
-#ifdef CONFIG_BUILD_CONFIG_TEMPLATE
     if (sd_cli_jit_mounted) {
         sd_card_unmount_after_flush(sd_cli_display_suspended);
         sd_cli_jit_mounted = false;
         sd_cli_display_suspended = false;
     }
-#endif
 }
 
 void handle_sd_cmd(int argc, char **argv) {
