@@ -43,7 +43,11 @@ static int fail_flush;
 
 static FILE *rotation_fopen(const char *path, const char *mode) {
   if (fail_open > 0) { --fail_open; return NULL; }
-  return fopen(path, mode);
+  FILE *stream = fopen(path, mode);
+  // POSIX permits ab+ to start reads at zero (glibc) or EOF (Darwin).
+  // Force the zero-position case on every host so recovery is deterministic.
+  if (stream && strcmp(mode, "ab+") == 0) assert(fseek(stream, 0, SEEK_SET) == 0);
+  return stream;
 }
 static int rotation_fclose(FILE *stream) {
   const int result = fclose(stream);
