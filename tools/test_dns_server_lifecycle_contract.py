@@ -11,7 +11,7 @@ SOURCE = (ROOT / "main/core/dns_server.c").read_text(encoding="utf-8")
 
 def body(function: str) -> str:
     match = re.search(
-        rf"(?:static\s+)?(?:void|dns_server_handle_t)\s+{function}\s*\([^)]*\)\s*\{{",
+        rf"(?:static\s+)?(?:void|dns_server_handle_t)\s+(?:__attribute__\(\(noinline\)\)\s+)?{function}\s*\([^)]*\)\s*\{{",
         SOURCE,
     )
     assert match, f"missing {function}"
@@ -32,9 +32,11 @@ assert stack_size, "missing DNS task stack-size constant"
 assert int(stack_size.group(1)) >= 6144, "DNS task stack regressed below 6144 bytes"
 
 task = body("dns_server_task")
-assert "SO_RCVTIMEO" in task, "legacy DNS socket can block shutdown indefinitely"
-assert "if (err < 0)" in task and "Socket unable to bind" in task
-assert "task_done:" in task and "for (;;) vTaskSuspend(NULL);" in task
+portal = body("dns_portal_run")
+assert "SO_RCVTIMEO" in portal, "legacy DNS socket can block shutdown indefinitely"
+assert "if (err < 0)" in portal and "Socket unable to bind" in portal
+assert "for (;;) vTaskSuspend(NULL);" in task
+assert "dns_portal_run(handle)" in task and "dns_sinkhole_run(handle)" in task
 assert "vTaskDelete(NULL)" not in task, "DNS task must not bypass socket cleanup"
 
 start = body("start_dns_server")

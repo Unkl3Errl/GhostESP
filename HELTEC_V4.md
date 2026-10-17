@@ -1,6 +1,6 @@
 # GhostESP for Heltec WiFi LoRa 32 V4
 
-This target adapts the complete GhostESP v2.1 stable release to the Heltec WiFi
+This target adapts the complete GhostESP v2.2.2 stable release to the Heltec WiFi
 LoRa 32 V4. The upstream source tree and optional integrations are preserved;
 the V4 port adds a board configuration, onboard GNSS power handling, CI
 packaging, and hardware-specific documentation.
@@ -30,14 +30,11 @@ removed because of that hardware limitation.
 
 ## Build
 
-Use ESP-IDF 6.0, matching the upstream CI workflow:
+Use ESP-IDF 6.1, matching the upstream CI workflow:
 
 ```sh
-rm -f sdkconfig sdkconfig.defaults
-cp configs/sdkconfig.heltecv4 sdkconfig.defaults
-cp configs/sdkconfig.heltecv4 sdkconfig
-idf.py set-target esp32s3
-SDKCONFIG_DEFAULTS=sdkconfig.defaults idf.py build
+idf.py -D IDF_TARGET=esp32s3 \
+  -D SDKCONFIG_DEFAULTS=configs/sdkconfig.heltecv4 build
 ```
 
 The GitHub workflow packages `HeltecV4.zip` with `bootloader.bin`,
@@ -45,7 +42,7 @@ The GitHub workflow packages `HeltecV4.zip` with `bootloader.bin`,
 
 ## Android-backed storage
 
-The Heltec V4 target uses a 12 MB wear-levelled FAT partition in internal flash
+The Heltec V4 target uses the shared 3 MiB wear-levelled FAT partition at `0xCF0000` in internal flash
 as its virtual SD card. That layout is isolated in
 `partitions_heltecv4.csv`; other board configurations retain the shared
 partition table appropriate to their flash size. Captures, wardriving CSV
@@ -86,9 +83,19 @@ previous firmware and its saved settings.
 Do not use `erase-flash` for a routine update when the virtual SD contains data
 you still need. Flashing the generated merged image at offset `0x0` updates the
 bootloader, partition table, and application while leaving the `storage`
-partition at `0x400000` untouched:
+partition at `0xCF0000` untouched:
 
 ```sh
 esptool.py --chip esp32s3 -p /dev/cu.usbmodemXXXX write_flash \
   0x0 GhostESP-heltecv4-android-storage.bin
 ```
+
+## 2.2.2 integration
+
+The `v2.2.2-mobile.1` source preserves the Heltec V4 boot power guard,
+phone-facing Bluetooth transport, CRC-acknowledged mobile spool, active-file
+protection, 128 KiB capture segments, wardrive POI sidecars, and DNS restart
+cleanup while integrating the complete upstream stable release. LoRa remains
+disabled for this target. Target compilation and source regression checks pass;
+USB/Bluetooth reconnect and interrupted archival still require board testing
+before replacing the signed recovery image.

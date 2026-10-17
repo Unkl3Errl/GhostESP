@@ -8,6 +8,8 @@
 #include "managers/settings_manager.h"
 #include "managers/status_display_manager.h"
 #include "managers/wifi_manager.h"
+#include "scans/wifi/hop_profile.h"
+#include "scans/wifi/wifi_channels.h"
 #if !defined(CONFIG_IDF_TARGET_ESP32S2) && !defined(GHOSTESP_NO_NATIVE_BLE)
 #include "managers/ble_manager.h"
 #endif
@@ -146,6 +148,91 @@ void handle_beaconspam(int argc, char **argv) {
     } else {
         glog("Usage: beaconspam -r (for Beacon Spam Random)\n");
         status_display_show_status("Beacon Usage");
+    }
+}
+
+static const char *hop_mode_name(hop_mode_t mode) {
+    switch (mode) {
+        case HOP_MODE_DEFAULT: return "auto";
+        case HOP_MODE_ALL: return "all";
+        case HOP_MODE_BASIC: return "basic";
+        case HOP_MODE_CUSTOM: return "custom";
+        default: return "auto";
+    }
+}
+
+static void hop_print_mode(const char *verb) {
+    hop_mode_t mode = HOP_MODE_DEFAULT;
+    hop_profile_get_mode(&mode);
+
+    glog("Hop mode: %s", hop_mode_name(mode));
+    if (mode == HOP_MODE_CUSTOM) {
+        const char *custom = hop_profile_get_custom_str();
+        glog(" [%s]", (custom && *custom) ? custom : "empty");
+    }
+
+    uint8_t channels[WIFI_CHANNELS_MAX] = {0};
+    size_t count = 0;
+    hop_profile_resolve_monitor(channels, sizeof(channels), &count);
+    glog(" -> %u channel", (unsigned)count);
+    if (count != 1) glog("s");
+    glog(": ");
+    for (size_t i = 0; i < count; i++) {
+        glog("%s%u", (i == 0) ? "" : ",", (unsigned)channels[i]);
+    }
+    if (count == 0) glog("(feature auto list)");
+    glog("\n");
+
+    if (verb && *verb) {
+        status_display_show_status(verb);
+    }
+}
+
+void handle_hop_cmd(int argc, char **argv) {
+    hop_mode_t mode = HOP_MODE_DEFAULT;
+    hop_profile_get_mode(&mode);
+    bool saved = false;
+
+    if (argc < 2) {
+        hop_print_mode(NULL);
+        return;
+    }
+
+    if (strcmp(argv[1], "auto") == 0 || strcmp(argv[1], "default") == 0 ||
+        strcmp(argv[1], "clear") == 0) {
+        hop_profile_set_mode(HOP_MODE_DEFAULT);
+        saved = true;
+    } else if (strcmp(argv[1], "all") == 0) {
+        hop_profile_set_mode(HOP_MODE_ALL);
+        saved = true;
+    } else if (strcmp(argv[1], "basic") == 0 || strcmp(argv[1], "1,6,11") == 0) {
+        hop_profile_set_mode(HOP_MODE_BASIC);
+        saved = true;
+    } else if (strcmp(argv[1], "custom") == 0) {
+        if (argc < 3) {
+            glog("Usage: hop custom <1,2,3> | hop 1,2,3\n");
+            return;
+        }
+        if (!hop_profile_set_custom_from_string(argv[2])) {
+            glog("Invalid channel list '%s'. Use channels supported by this target and country\n", argv[2]);
+            return;
+        }
+        hop_profile_set_mode(HOP_MODE_CUSTOM);
+        saved = true;
+    } else {
+        // Treat the argument as a bare channel list.
+        if (!hop_profile_set_custom_from_string(argv[1])) {
+            glog("Usage: hop [auto|all|basic|custom <1,2,3>|1,2,3]\n");
+            glog("Invalid channel list '%s'. Use channels supported by this target and country\n", argv[1]);
+            return;
+        }
+        hop_profile_set_mode(HOP_MODE_CUSTOM);
+        saved = true;
+    }
+
+    if (saved) {
+        settings_save(&G_Settings);
+        hop_print_mode("Hop Set");
     }
 }
 
@@ -414,78 +501,14 @@ void handle_wifi_connection(int argc, char **argv) {
         }
         glog("Connecting using saved credentials: %s\n", ssid);
     } else {
-        char ssid_buffer[128] = {0};
-        char password_buffer[128] = {0};
-        int i = 1;
-        // SSID parsing
-        if (argv[1][0] == '"') {
-            char *dest = ssid_buffer;
-            bool found_end = false;
-            strncpy(dest, &argv[1][1], sizeof(ssid_buffer) - 1);
-            dest += strlen(&argv[1][1]);
-            if (argv[1][strlen(argv[1]) - 1] == '"') {
-                ssid_buffer[strlen(ssid_buffer) - 1] = '\0';
-                found_end = true;
-            }
-            i = 2;
-            while (!found_end && i < argc) {
-                *dest++ = ' ';
-                if (strchr(argv[i], '"')) {
-                    size_t len = strchr(argv[i], '"') - argv[i];
-                    strncpy(dest, argv[i], len);
-                    dest[len] = '\0';
-                    found_end = true;
-                } else {
-                    strncpy(dest, argv[i], sizeof(ssid_buffer) - (dest - ssid_buffer) - 1);
-                    dest += strlen(argv[i]);
-                }
-                i++;
-            }
-            if (!found_end) {
-                glog("Error: Missing closing quote for SSID\n");
-                return;
-            }
-            ssid = ssid_buffer;
-        } else {
-            ssid = argv[1];
-            i = 2;
+        if (argc > 3) {
+            glog("Usage: connect <SSID> [PASSWORD] (quote arguments containing spaces)\n");
+            return;
         }
-        // Password parsing
-        if (i < argc) {
-            if (argv[i][0] == '"') {
-                char *dest = password_buffer;
-                bool found_end = false;
-                strncpy(dest, &argv[i][1], sizeof(password_buffer) - 1);
-                dest += strlen(&argv[i][1]);
-                if (argv[i][strlen(argv[i]) - 1] == '"') {
-                    password_buffer[strlen(password_buffer) - 1] = '\0';
-                    found_end = true;
-                }
-                i++;
-                while (!found_end && i < argc) {
-                    *dest++ = ' ';
-                    if (strchr(argv[i], '"')) {
-                        size_t len = strchr(argv[i], '"') - argv[i];
-                        strncpy(dest, argv[i], len);
-                        dest[len] = '\0';
-                        found_end = true;
-                    } else {
-                        strncpy(dest, argv[i], sizeof(password_buffer) - (dest - password_buffer) - 1);
-                        dest += strlen(argv[i]);
-                    }
-                    i++;
-                }
-                if (!found_end) {
-                    glog("Error: Missing closing quote for password\n");
-                    return;
-                }
-                password = password_buffer;
-            } else {
-                password = argv[i];
-            }
-        } else {
-            password = "";
-        }
+        // handle_serial_command already removed quote delimiters. Parse once;
+        // literal quotes inside a credential are data, not another quoting layer.
+        ssid = argv[1];
+        password = argc > 2 ? argv[2] : "";
         // Save provided credentials to NVS
         settings_set_sta_ssid(&G_Settings, ssid);
         settings_set_sta_password(&G_Settings, password);
