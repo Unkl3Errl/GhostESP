@@ -92,7 +92,7 @@ esptool.py --chip esp32s3 -p /dev/cu.usbmodemXXXX write_flash \
 
 ## 2.2.2 integration
 
-The `v2.2.2-mobile.1` source preserves the Heltec V4 boot power guard,
+The `v2.2.2-mobile.2` source preserves the Heltec V4 boot power guard,
 phone-facing Bluetooth transport, CRC-acknowledged mobile spool, active-file
 protection, 128 KiB capture segments, wardrive POI sidecars, and DNS restart
 cleanup while integrating the complete upstream stable release. LoRa remains

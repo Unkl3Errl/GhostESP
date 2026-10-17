@@ -1022,6 +1022,9 @@ static esp_err_t pcap_rotate_mobile_segment(FILE **stream) {
     clearerr(*stream);
     return ESP_FAIL;
   }
+  // ab+ streams may reopen with their read position at the beginning. Measure
+  // the end explicitly before deciding whether a recovered segment is full.
+  if (fseek(*stream, 0, SEEK_END) != 0) return ESP_FAIL;
   long size = ftell(*stream);
   if (size < 0) return ESP_FAIL;
   if (size == 0 || (uint64_t)size + buffer_offset <= ANDROID_SPOOL_SEGMENT_BYTES) {
