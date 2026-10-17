@@ -1,5 +1,6 @@
 #include "scans/wifi/airspace_monitor.h"
 #include "core/callbacks.h"
+#include "core/utils.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -7,6 +8,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h"
 #include "scans/wifi/wifi_channels.h"
+#include "scans/wifi/hop_profile.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -35,12 +37,6 @@
 #define AIRSPACE_SEC_SAE         0x20U
 #define AIRSPACE_SEC_OWE         0x40U
 #define AIRSPACE_SEC_PMF_REQUIRED 0x80U
-
-#if defined(CONFIG_IDF_TARGET_ESP32C5)
-#define AIRSPACE_MAX_WIFI_CHANNEL 165
-#else
-#define AIRSPACE_MAX_WIFI_CHANNEL 13
-#endif
 
 typedef struct {
     bool used;
@@ -549,17 +545,19 @@ static void build_channel_list(void) {
     }
 
     uint8_t candidates[WIFI_CHANNELS_MAX] = {0};
-    uint8_t candidate_count = wifi_channels_build_country_list(candidates, WIFI_CHANNELS_MAX);
-    if (candidate_count == 0) {
-        static const uint8_t fallback[] = {
-            1,2,3,4,5,6,7,8,9,10,11,12,13,
-            36,40,44,48,149,153,157,161,165
-        };
-        candidate_count = 0;
-        for (size_t i = 0; i < sizeof(fallback) && candidate_count < WIFI_CHANNELS_MAX; i++) {
-            if (fallback[i] <= AIRSPACE_MAX_WIFI_CHANNEL) {
-                candidates[candidate_count++] = fallback[i];
-            }
+
+    // User hop profile takes priority; otherwise build the country-appropriate
+    // list (with the legacy fallback if the country query comes up empty).
+    size_t profile_count = 0;
+    hop_profile_resolve_monitor(candidates, WIFI_CHANNELS_MAX, &profile_count);
+    uint8_t candidate_count;
+    if (profile_count > 0) {
+        candidate_count = (uint8_t)profile_count;
+    } else {
+        candidate_count = wifi_channels_build_country_list(candidates, WIFI_CHANNELS_MAX);
+        if (candidate_count == 0) {
+            candidates[0] = 1;
+            candidate_count = 1;
         }
     }
 
@@ -576,8 +574,8 @@ static void build_channel_list(void) {
         if (duplicate) {
             continue;
         }
-        if (!wifi_channels_is_safe_monitor_channel(ch)) {
-            ESP_LOGD(TAG, "Skipping DFS/unsafe monitor channel %u", (unsigned)ch);
+        if (!wifi_channels_is_monitor_channel(ch)) {
+            ESP_LOGD(TAG, "Skipping country/unsupported monitor channel %u", (unsigned)ch);
             continue;
         }
 
@@ -635,7 +633,7 @@ static void hop_timer_cb(void *arg) {
         portEXIT_CRITICAL(&s_lock);
         attempts_made++;
 
-        if (!wifi_channels_is_safe_monitor_channel(channel)) {
+        if (!wifi_channels_is_monitor_channel(channel)) {
             portENTER_CRITICAL(&s_lock);
             s_hop_fail++;
             portEXIT_CRITICAL(&s_lock);
@@ -1119,13 +1117,20 @@ void airspace_monitor_get_snapshot(airspace_monitor_snapshot_t *out) {
         }
     } else if (pattern_confirmed && pattern == AIRSPACE_PATTERN_EVIL) {
         snap.threat_level = AIRSPACE_THREAT_SUSPICIOUS;
-        snprintf(snap.reason, sizeof(snap.reason), "Evil twin: %s (sec mismatch)", evil_ssid_w);
+        /* snap.reason is display-only; redact the observed SSID in privacy mode. */
+        char ssid_disp[33];
+        privacy_redact_ssid_copy(evil_ssid_w, ssid_disp, sizeof(ssid_disp));
+        snprintf(snap.reason, sizeof(snap.reason), "Evil twin: %s (sec mismatch)", ssid_disp);
     } else if (pattern_confirmed && pattern == AIRSPACE_PATTERN_KARMA) {
         snap.threat_level = AIRSPACE_THREAT_SUSPICIOUS;
-        snprintf(snap.reason, sizeof(snap.reason),
-                 "Karma AP: %02X:%02X:%02X:%02X:%02X:%02X (%lu SSIDs)",
+        char mac_disp[18];
+        snprintf(mac_disp, sizeof(mac_disp), "%02X:%02X:%02X:%02X:%02X:%02X",
                  karma_mac[0], karma_mac[1], karma_mac[2], karma_mac[3],
-                 karma_mac[4], karma_mac[5], (unsigned long)karma_ssids);
+                 karma_mac[4], karma_mac[5]);
+        privacy_redact_mac(mac_disp);
+        snprintf(snap.reason, sizeof(snap.reason),
+                 "Karma AP: %s (%lu SSIDs)",
+                 mac_disp, (unsigned long)karma_ssids);
     } else if (pattern_confirmed && pattern == AIRSPACE_PATTERN_KICK) {
         snap.threat_level = AIRSPACE_THREAT_SUSPICIOUS;
         snprintf(snap.reason, sizeof(snap.reason), "Elevated kick traffic: %lu/s (base %lu)",
